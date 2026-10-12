@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 from typing import Any
 from faster_whisper import WhisperModel
-#from myanmartts import MyanmarTTS
+from myanmartts import MyanmarTTS
 import openai  # OpenAI library ကို အသုံးပြု၍ Ollama local server သို့ ချိတ်ဆက်ရန်
 
 class ProviderError(RuntimeError):

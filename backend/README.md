@@ -1,3 +1,12 @@
+---
+title: Video Recap Backend
+emoji: 🎥
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+pinned: false
+---
+
 # RecapKit API
 
 The backend accepts video uploads, stores them locally in `backend/storage/uploads`, and queues FFmpeg audio-extraction, subtitle-burn, video-split, or AI recap voiceover jobs. Job state and generated recap scripts are persisted in SQLite at `backend/storage/jobs.sqlite3`.
