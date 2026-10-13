@@ -76,7 +76,7 @@ export default function Home() {
   const [subtitlePosition, setSubtitlePosition] = useState<"top" | "center" | "bottom">("bottom");
   const [outline, setOutline] = useState(2);
   const [segmentSeconds, setSegmentSeconds] = useState<30 | 60 | 120>(60);
-  const [recapSeconds, setRecapSeconds] = useState<30 | 60 | 90>(60);
+  const [recapSeconds, setRecapSeconds] = useState<number>(600);
   const [voice, setVoice] = useState<"my-MM-NilarNeural" | "my-MM-ThihaNeural">("my-MM-NilarNeural");
   const [includeOriginalAudio, setIncludeOriginalAudio] = useState(true);
   const [backgroundVolume, setBackgroundVolume] = useState(20);
@@ -479,15 +479,14 @@ export default function Home() {
             <div className="voiceover-fields">
               <label className="style-field">
                 <span>Narration length</span>
-                <select value={recapSeconds} onChange={(event) => setRecapSeconds(Number(event.target.value) as typeof recapSeconds)}>
+                <select value={recapSeconds} onChange={(event) => setRecapSeconds(Number(event.target.value))}>
                   <option value={30}>About 30 sec</option>
                   <option value={60}>About 1 min</option>
-                  <option value={90}>About 90 sec</option>
                   <option value={120}>About 2 min</option>
-                  <option value={180}>About 3 min</option>
                   <option value={300}>About 5 min</option>
                   <option value={420}>About 7 min</option>
                   <option value={600}>About 10 min</option>
+                  <option value={900}>About 15 min</option>
                 </select>
               </label>
               <label className="style-field">
