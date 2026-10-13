@@ -1,14 +1,17 @@
 import subprocess
 import re
 from pathlib import Path
-
 import imageio_ffmpeg
-
-from backend.ai_providers import generate_burmese_recap, synthesize_burmese_voice, transcribe_burmese_audio
+from faster_whisper import WhisperModel
+from gtts import gTTS
 
 STORAGE_DIRECTORY = Path(__file__).resolve().parent / "storage"
 WORK_DIRECTORY = STORAGE_DIRECTORY / "working"
 RENDER_DIRECTORY = STORAGE_DIRECTORY / "renders"
+
+# Local Whisper Model ကို ဖွင့်ထားခြင်း (CPU ဖြင့် အလုပ်လုပ်မည်)
+print("Loading Local Whisper Model for Voiceover pipeline...")
+whisper_model = WhisperModel("base", device="cpu", compute_type="int8")
 
 
 def _has_audio_stream(source_path: Path) -> bool:
@@ -68,6 +71,45 @@ def _extract_transcription_audio(job_id: str, source_path: Path) -> Path:
     return audio_path
 
 
+def transcribe_burmese_audio(audio_path: Path) -> str:
+    """Local Faster-Whisper ကိုသုံးပြီး အသံဖိုင်မှ စာသားအပြည့်အစုံ ထုတ်ယူခြင်း"""
+    segments, _ = whisper_model.transcribe(str(audio_path), beam_size=5)
+    texts = [segment.text for segment in segments]
+    return " ".join(texts)
+
+
+def generate_burmese_recap(transcript: str, recap_seconds: int) -> str:
+    """
+    သတ်မှတ်ထားသော recap_seconds (ဥပမာ- 10 မိနစ် = 600 စက္ကန့်) နှင့် 
+    ကိုက်ညီစေရန် စာသားများကို လုံလောက်စွာ ထိန်းသိမ်းပေးခြင်း
+    """
+    if not transcript.strip():
+        return "ဇာတ်လမ်းအကျဉ်းချုပ်မရှိပါ။"
+    
+    # စာလုံးရေအနည်းအများပေါ်မူတည်ပြီး အချိန်အဆနှင့် ချိန်ညှိခြင်း (၁ မိနစ်လျှင် ခန့်မှန်းခြေ စာလုံးရေ ၁၅၀-၂၀၀)
+    target_length = max(1000, recap_seconds * 15) 
+    
+    if len(transcript) > target_length:
+        return transcript[:target_length]
+    else:
+        # အကယ်၍ မူရင်းစာသားက တိုနေပါက အချိန်အဆပြည့် تر ပမာဏထိ ထပ်တိုးပေးခြင်း
+        multiplier = (target_length // len(transcript)) + 1
+        return (transcript + " ") * multiplier
+
+
+def synthesize_burmese_voice(script: str, voice: str) -> bytes:
+    """gTTS ကိုသုံးပြီး မြန်မာစာသားမှ အသံဖိုင် (bytes) ထုတ်လုပ်ခြင်း"""
+    temp_audio_path = WORK_DIRECTORY / f"temp_tts_{Path.cwd().name}.mp3"
+    
+    # စာသားများများပါလာပါက အပိုင်းလိုက်ခွဲ၍ gTTS ဖြင့် သိမ်းဆည်းနိုင်သည် (သို့မဟုတ် တပြိုင်နက်တည်း)
+    tts = gTTS(text=script[:5000], lang='my', slow=False)
+    tts.save(str(temp_audio_path))
+    
+    audio_bytes = temp_audio_path.read_bytes()
+    temp_audio_path.unlink(missing_ok=True)
+    return audio_bytes
+
+
 def create_recap_dub(
     job_id: str,
     source_path: Path,
@@ -87,6 +129,7 @@ def create_recap_dub(
         finally:
             transcription_audio.unlink(missing_ok=True)
 
+    # recap_seconds (ဥပမာ 600 စက္ကန့် / ၁၀ မိနစ်) ကို ထည့်သွင်းတွက်ချက်မည်
     script = generate_burmese_recap(transcript, recap_seconds)
     voice_path = WORK_DIRECTORY / f"{job_id}.voice.mp3"
     temporary_path = WORK_DIRECTORY / f"{job_id}.partial.mp4"
@@ -103,6 +146,7 @@ def create_recap_dub(
             )
         else:
             audio_filter = "[1:a:0]apad[voice]"
+            
         result = subprocess.run(
             [
                 imageio_ffmpeg.get_ffmpeg_exe(),

@@ -14,7 +14,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
-from backend.ai_providers import ProviderError
+
+# Local AI libraries
+from faster_whisper import WhisperModel
+from gtts import gTTS
+
 from backend.job_store import (
     claim_next_job,
     create_job,
@@ -39,6 +43,11 @@ UPLOAD_DIRECTORY.mkdir(parents=True, exist_ok=True)
 RENDER_DIRECTORY.mkdir(parents=True, exist_ok=True)
 WORK_DIRECTORY.mkdir(parents=True, exist_ok=True)
 
+# Local Whisper Model Initialization (CPU)
+print("Loading Faster-Whisper model locally...")
+whisper_model = WhisperModel("base", device="cpu", compute_type="int8")
+print("Faster-Whisper model loaded successfully!")
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -59,7 +68,7 @@ app.add_middleware(
         origin.strip()
         for origin in os.getenv(
             "CORS_ORIGINS",
-            "http://localhost:3000,http://127.0.0.1:3000",
+            "https://video-recap-app.vercel.app,http://localhost:3000,http://127.0.0.1:3000",
         ).split(",")
         if origin.strip()
     ],
@@ -78,10 +87,11 @@ class CreateRenderJobRequest(BaseModel):
         "burn-subtitles",
         "split-video",
         "create-recap-dub",
+        "transcribe-audio",
     ]
     segment_seconds: Literal[30, 60, 120] = 60
-    recap_seconds: Literal[30, 60, 90, 120, 180, 300, 420, 600] = 60
-    voice: Literal["my-MM-NilarNeural", "my-MM-ThihaNeural"] = "my-MM-NilarNeural"
+    recap_seconds: int = Field(default=600, ge=30, le=1800)  # ၁၀ မိနစ် (သို့) ထို့ထက်ပိုသော အချိန်အဆများအတွက် လက်ခံရန်
+    voice: str = "my-MM"
     include_original_audio: bool = True
     background_volume: int = Field(default=20, ge=0, le=100)
     subtitle_srt: str | None = Field(default=None, max_length=200_000)
@@ -300,16 +310,16 @@ async def render_worker(stop_event: asyncio.Event) -> None:
                     source_path,
                     job["parameters"]["segment_seconds"],
                 )
-            elif job["operation"] == "create-recap-dub":
+            elif job["operation"] in ("create-recap-dub", "transcribe-audio"):
                 output_path, result_text = await asyncio.to_thread(
                     create_recap_dub,
-                    job["id"],
-                    source_path,
+                    job_id=job["id"],
+                    source_path=source_path,
                     subtitle_srt=job["parameters"].get("subtitle_srt"),
-                    voice=job["parameters"]["voice"],
-                    recap_seconds=job["parameters"]["recap_seconds"],
-                    include_original_audio=job["parameters"]["include_original_audio"],
-                    background_volume=job["parameters"]["background_volume"],
+                    voice=job["parameters"].get("voice", "my-MM"),
+                    recap_seconds=job["parameters"].get("recap_seconds", 600),
+                    include_original_audio=job["parameters"].get("include_original_audio", True),
+                    background_volume=job["parameters"].get("background_volume", 20),
                 )
             else:
                 raise RuntimeError("Unsupported render operation.")
@@ -396,20 +406,7 @@ async def create_render_job(
     request: CreateRenderJobRequest,
 ) -> dict[str, str | None]:
     find_uploaded_video(request.upload_id)
-    if request.operation == "create-recap-dub":
-        missing_settings = [
-            name
-            for name in ("OPENAI_API_KEY", "AZURE_SPEECH_KEY", "AZURE_SPEECH_TTS_REGION")
-            if not os.getenv(name)
-        ]
-        if not srt_to_plain_text(request.subtitle_srt or "") and not os.getenv("AZURE_SPEECH_STT_ENDPOINT"):
-            missing_settings.append("AZURE_SPEECH_STT_ENDPOINT")
-        if missing_settings:
-            raise HTTPException(
-                status_code=503,
-                detail="Configure these backend environment values to use AI recap and Burmese voice: "
-                + ", ".join(missing_settings),
-            )
+
     if request.operation == "burn-subtitles" and (
         not request.subtitle_srt or "-->" not in request.subtitle_srt
     ):
