@@ -1,17 +1,32 @@
+import os
 import subprocess
 import re
 from pathlib import Path
+from typing import Literal
 import imageio_ffmpeg
 from faster_whisper import WhisperModel
-from gtts import gTTS
+from backend.ai_providers import (
+    generate_burmese_recap as generate_recap_script,
+    synthesize_burmese_voice as synthesize_voice,
+    translate_to_burmese,
+)
 
 STORAGE_DIRECTORY = Path(__file__).resolve().parent / "storage"
 WORK_DIRECTORY = STORAGE_DIRECTORY / "working"
 RENDER_DIRECTORY = STORAGE_DIRECTORY / "renders"
 
-# Local Whisper Model ကို ဖွင့်ထားခြင်း (CPU ဖြင့် အလုပ်လုပ်မည်)
-print("Loading Local Whisper Model for Voiceover pipeline...")
-whisper_model = WhisperModel("base", device="cpu", compute_type="int8")
+whisper_model: WhisperModel | None = None
+
+
+def get_whisper_model() -> WhisperModel:
+    global whisper_model
+    if whisper_model is None:
+        whisper_model = WhisperModel(
+            os.getenv("WHISPER_MODEL_SIZE", "base"),
+            device="cpu",
+            compute_type="int8",
+        )
+    return whisper_model
 
 
 def _has_audio_stream(source_path: Path) -> bool:
@@ -71,43 +86,26 @@ def _extract_transcription_audio(job_id: str, source_path: Path) -> Path:
     return audio_path
 
 
+def transcribe_audio(audio_path: Path, language: str) -> str:
+    if not audio_path.exists():
+        raise RuntimeError(f"Audio file not found: {audio_path}")
+    segments, _ = get_whisper_model().transcribe(str(audio_path), beam_size=5, language=language)
+    transcript = " ".join(segment.text.strip() for segment in segments if segment.text.strip())
+    if not transcript:
+        raise RuntimeError(f"Whisper did not recognize any {language} speech.")
+    return transcript
+
+
 def transcribe_burmese_audio(audio_path: Path) -> str:
-    """Local Faster-Whisper ကိုသုံးပြီး အသံဖိုင်မှ စာသားအပြည့်အစုံ ထုတ်ယူခြင်း"""
-    segments, _ = whisper_model.transcribe(str(audio_path), beam_size=5)
-    texts = [segment.text for segment in segments]
-    return " ".join(texts)
+    return transcribe_audio(audio_path, language="my")
 
 
 def generate_burmese_recap(transcript: str, recap_seconds: int) -> str:
-    """
-    သတ်မှတ်ထားသော recap_seconds (ဥပမာ- 10 မိနစ် = 600 စက္ကန့်) နှင့် 
-    ကိုက်ညီစေရန် စာသားများကို လုံလောက်စွာ ထိန်းသိမ်းပေးခြင်း
-    """
-    if not transcript.strip():
-        return "ဇာတ်လမ်းအကျဉ်းချုပ်မရှိပါ။"
-    
-    # စာလုံးရေအနည်းအများပေါ်မူတည်ပြီး အချိန်အဆနှင့် ချိန်ညှိခြင်း (၁ မိနစ်လျှင် ခန့်မှန်းခြေ စာလုံးရေ ၁၅၀-၂၀၀)
-    target_length = max(1000, recap_seconds * 15) 
-    
-    if len(transcript) > target_length:
-        return transcript[:target_length]
-    else:
-        # အကယ်၍ မူရင်းစာသားက တိုနေပါက အချိန်အဆပြည့် تر ပမာဏထိ ထပ်တိုးပေးခြင်း
-        multiplier = (target_length // len(transcript)) + 1
-        return (transcript + " ") * multiplier
+    return generate_recap_script(transcript, recap_seconds)
 
 
 def synthesize_burmese_voice(script: str, voice: str) -> bytes:
-    """gTTS ကိုသုံးပြီး မြန်မာစာသားမှ အသံဖိုင် (bytes) ထုတ်လုပ်ခြင်း"""
-    temp_audio_path = WORK_DIRECTORY / f"temp_tts_{Path.cwd().name}.mp3"
-    
-    # စာသားများများပါလာပါက အပိုင်းလိုက်ခွဲ၍ gTTS ဖြင့် သိမ်းဆည်းနိုင်သည် (သို့မဟုတ် တပြိုင်နက်တည်း)
-    tts = gTTS(text=script[:5000], lang='my', slow=False)
-    tts.save(str(temp_audio_path))
-    
-    audio_bytes = temp_audio_path.read_bytes()
-    temp_audio_path.unlink(missing_ok=True)
-    return audio_bytes
+    return synthesize_voice(script, voice)
 
 
 def create_recap_dub(
@@ -119,21 +117,28 @@ def create_recap_dub(
     recap_seconds: int,
     include_original_audio: bool,
     background_volume: int,
+    mode: Literal["recap", "dubbing"] = "recap",
 ) -> tuple[Path, str]:
     transcript = srt_to_plain_text(subtitle_srt or "")
     transcription_audio: Path | None = None
     if not transcript:
         transcription_audio = _extract_transcription_audio(job_id, source_path)
         try:
-            transcript = transcribe_burmese_audio(transcription_audio)
+            transcript = transcribe_audio(
+                transcription_audio,
+                language="th" if mode == "dubbing" else "my",
+            )
         finally:
             transcription_audio.unlink(missing_ok=True)
 
-    # recap_seconds (ဥပမာ 600 စက္ကန့် / ၁၀ မိနစ်) ကို ထည့်သွင်းတွက်ချက်မည်
-    script = generate_burmese_recap(transcript, recap_seconds)
+    script = (
+        translate_to_burmese(transcript)
+        if mode == "dubbing"
+        else generate_burmese_recap(transcript, recap_seconds)
+    )
     voice_path = WORK_DIRECTORY / f"{job_id}.voice.mp3"
     temporary_path = WORK_DIRECTORY / f"{job_id}.partial.mp4"
-    output_path = RENDER_DIRECTORY / f"{job_id}-recap.mp4"
+    output_path = RENDER_DIRECTORY / f"{job_id}-{mode}.mp4"
     mix_original_audio = include_original_audio and _has_audio_stream(source_path)
 
     try:

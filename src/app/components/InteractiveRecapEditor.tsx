@@ -23,7 +23,6 @@ export default function InteractiveRecapEditor({
 }: InteractiveRecapEditorProps) {
   const [segments, setSegments] = useState<RecapSegment[]>(initialSegments);
   const [currentTime, setCurrentTime] = useState<number>(0);
-  const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const videoRef = useRef<HTMLVideoElement>(null);
 
   // ဗီဒီယို အချိန်ပြောင်းလဲသည့်အခါ လက်ရှိအချိန်ကို မှတ်သားရန်
@@ -45,7 +44,6 @@ export default function InteractiveRecapEditor({
     if (videoRef.current) {
       videoRef.current.currentTime = startTime;
       videoRef.current.play();
-      setIsPlaying(true);
     }
   };
 
@@ -68,8 +66,6 @@ export default function InteractiveRecapEditor({
             src={initialVideoUrl}
             controls
             onTimeUpdate={handleTimeUpdate}
-            onPlay={() => setIsPlaying(true)}
-            onPause={() => setIsPlaying(false)}
             className="w-full h-full object-contain"
           />
         </div>

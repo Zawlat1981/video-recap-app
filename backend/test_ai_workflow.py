@@ -16,6 +16,7 @@ from backend import main
 from backend.ai_providers import (
     generate_burmese_recap,
     synthesize_burmese_voice,
+    translate_to_burmese,
     transcribe_burmese_audio,
 )
 from backend.voiceover import create_recap_dub, srt_to_plain_text
@@ -23,19 +24,20 @@ from backend.voiceover import create_recap_dub, srt_to_plain_text
 
 class AIProviderTests(unittest.TestCase):
     def test_openai_recap_uses_configured_model_and_returns_script(self) -> None:
-        response = Mock(ok=True)
-        response.json.return_value = {
-            "choices": [{"message": {"content": "မြန်မာ ဇာတ်လမ်းအကျဉ်း"}}]
-        }
+        response = Mock()
+        response.choices = [Mock()]
+        response.choices[0].message.content = "မြန်မာ ဇာတ်လမ်းအကျဉ်း"
         with patch.dict(
             os.environ,
             {"OPENAI_API_KEY": "test-key", "OPENAI_CHAT_MODEL": "test-model"},
-        ), patch("backend.ai_providers.requests.post", return_value=response) as request:
+        ), patch("backend.ai_providers.openai.OpenAI") as client_class:
+            client_class.return_value.chat.completions.create.return_value = response
             result = generate_burmese_recap("ဇာတ်လမ်းစာသား", 60)
 
         self.assertEqual(result, "မြန်မာ ဇာတ်လမ်းအကျဉ်း")
-        self.assertEqual(request.call_args.kwargs["json"]["model"], "test-model")
-        self.assertTrue(request.call_args.args[0].endswith("/chat/completions"))
+        request = client_class.return_value.chat.completions.create.call_args.kwargs
+        self.assertEqual(request["model"], "test-model")
+        self.assertIn("60 စက္ကန့်စာ", request["messages"][1]["content"])
 
     def test_azure_transcription_sets_burmese_locale(self) -> None:
         response = Mock(ok=True)
@@ -75,6 +77,23 @@ class AIProviderTests(unittest.TestCase):
             request.call_args.kwargs["headers"]["X-Microsoft-OutputFormat"],
             "audio-24khz-48kbitrate-mono-mp3",
         )
+
+    def test_translation_uses_direct_burmese_translation_prompt(self) -> None:
+        response = Mock()
+        response.choices = [Mock()]
+        response.choices[0].message.content = "ဘဝမှာ ဘယ်လိုပဲဖြစ်ဖြစ်"
+        with patch.dict(
+            os.environ,
+            {"OPENAI_API_KEY": "test-key", "OPENAI_CHAT_MODEL": "test-model"},
+        ), patch("backend.ai_providers.openai.OpenAI") as client_class:
+            client_class.return_value.chat.completions.create.return_value = response
+            translated = translate_to_burmese("ถ้าชีวิตจะเป็นอย่างไร")
+
+        self.assertEqual(translated, "ဘဝမှာ ဘယ်လိုပဲဖြစ်ဖြစ်")
+        request = client_class.return_value.chat.completions.create.call_args.kwargs
+        self.assertEqual(request["model"], "test-model")
+        self.assertIn("Do not summarize", request["messages"][0]["content"])
+        self.assertEqual(request["messages"][1]["content"], "ถ้าชีวิตจะเป็นอย่างไร")
 
     def test_srt_text_removes_cues_and_timecodes(self) -> None:
         subtitle = "1\n00:00:00,000 --> 00:00:02,000\nမင်္ဂလာပါ\n\n2\n00:00:02,000 --> 00:00:04,000\nဇာတ်လမ်း"
@@ -135,6 +154,164 @@ class VoiceoverMuxTests(unittest.TestCase):
 
         for job_id in job_ids:
             (Path(__file__).resolve().parent / "storage" / "working" / f"{job_id}.voice.mp3").unlink(missing_ok=True)
+
+    def test_dubbing_translates_thai_dialogue_without_summarizing(self) -> None:
+        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        job_id = uuid.uuid4().hex
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_path = root / "source.mp4"
+            transcription_audio = root / "source.mp3"
+            voice_path = root / "voice.mp3"
+            subprocess.run(
+                [ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=1", "-codec:a", "libmp3lame", str(voice_path)],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                [ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=teal:s=320x180:d=2:r=12", "-f", "lavfi", "-i", "sine=frequency=440:duration=2", "-shortest", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", str(source_path)],
+                check=True,
+                capture_output=True,
+            )
+
+            with patch("backend.voiceover._extract_transcription_audio", return_value=transcription_audio), patch(
+                "backend.voiceover.transcribe_audio",
+                return_value="ถ้าชีวิตจะเป็นอย่างไร",
+            ) as transcribe, patch(
+                "backend.voiceover.translate_to_burmese",
+                return_value="ဘဝမှာ ဘယ်လိုပဲဖြစ်ဖြစ်",
+            ) as translate, patch(
+                "backend.voiceover.synthesize_burmese_voice",
+                return_value=voice_path.read_bytes(),
+            ) as synthesize:
+                output_path, translated_script = create_recap_dub(
+                    job_id,
+                    source_path,
+                    subtitle_srt=None,
+                    voice="my-MM-NilarNeural",
+                    recap_seconds=60,
+                    include_original_audio=False,
+                    background_volume=0,
+                    mode="dubbing",
+                )
+
+            self.assertEqual(translated_script, "ဘဝမှာ ဘယ်လိုပဲဖြစ်ဖြစ်")
+            transcribe.assert_called_once_with(transcription_audio, language="th")
+            translate.assert_called_once_with("ถ้าชีวิตจะเป็นอย่างไร")
+            synthesize.assert_called_once_with("ဘဝမှာ ဘယ်လိုပဲဖြစ်ဖြစ်", "my-MM-NilarNeural")
+            self.assertTrue(output_path.is_file())
+            output_path.unlink()
+            (Path(__file__).resolve().parent / "storage" / "working" / f"{job_id}.voice.mp3").unlink(missing_ok=True)
+
+
+class HideOriginalSubtitlesTests(unittest.TestCase):
+    def test_supported_methods_render_video_without_shell_commands(self) -> None:
+        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_path = root / "source.mp4"
+            renders = root / "renders"
+            working = root / "working"
+            renders.mkdir()
+            working.mkdir()
+            subprocess.run(
+                [
+                    ffmpeg,
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=c=teal:s=320x180:d=1:r=12",
+                    "-c:v",
+                    "libx264",
+                    "-pix_fmt",
+                    "yuv420p",
+                    str(source_path),
+                ],
+                check=True,
+                capture_output=True,
+            )
+
+            with patch.object(main, "RENDER_DIRECTORY", renders), patch.object(
+                main,
+                "WORK_DIRECTORY",
+                working,
+            ):
+                for method in ("blur", "blackbox", "crop"):
+                    output_path = main.hide_original_subtitles(uuid.uuid4().hex, source_path, method)
+                    self.assertTrue(output_path.is_file())
+                    subprocess.run(
+                        [ffmpeg, "-hide_banner", "-loglevel", "error", "-i", str(output_path), "-f", "null", "-"],
+                        check=True,
+                        capture_output=True,
+                    )
+
+
+class VideoDesignExportTests(unittest.TestCase):
+    def test_template_and_animated_text_are_rendered_into_mp4(self) -> None:
+        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_path = root / "source.mp4"
+            renders = root / "renders"
+            working = root / "working"
+            renders.mkdir()
+            working.mkdir()
+            subprocess.run(
+                [
+                    ffmpeg,
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=c=teal:s=320x180:d=1:r=12",
+                    "-c:v",
+                    "libx264",
+                    "-pix_fmt",
+                    "yuv420p",
+                    str(source_path),
+                ],
+                check=True,
+                capture_output=True,
+            )
+
+            with patch.object(main, "RENDER_DIRECTORY", renders), patch.object(
+                main,
+                "WORK_DIRECTORY",
+                working,
+            ), patch.dict(os.environ, {"VIDEO_FONT_PATH": ""}):
+                for ratio, animation, expected_size in (
+                    ("16:9", "none", "1920x1080"),
+                    ("9:16", "fade", "1080x1920"),
+                    ("1:1", "slide", "1080x1080"),
+                    ("1:1", "pop", "1080x1080"),
+                ):
+                    output_path = main.apply_video_design(
+                        uuid.uuid4().hex,
+                        source_path,
+                        {
+                            "template_ratio": ratio,
+                            "text_overlay": "Myanmar export",
+                            "text_animation": animation,
+                            "text_position": "bottom",
+                            "text_size": 24,
+                            "text_color": "white",
+                        },
+                    )
+
+                    probe = subprocess.run(
+                        [ffmpeg, "-hide_banner", "-i", str(output_path)],
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertIn("Video: h264", probe.stderr)
+                    self.assertIn(expected_size, probe.stderr)
+                    output_path.unlink()
 
 
 class JobStoreMigrationTests(unittest.TestCase):
@@ -209,7 +386,11 @@ class RenderWorkerTests(unittest.TestCase):
                     main,
                     "create_recap_dub",
                     side_effect=fake_recap_dub,
-                ):
+                ) as recap_dub, patch.object(
+                    main,
+                    "apply_video_design",
+                    side_effect=lambda _, path, __: path,
+                ) as design:
                     asyncio.run(run_worker())
 
                 saved_job = job_store.get_job(job_id)
@@ -217,6 +398,9 @@ class RenderWorkerTests(unittest.TestCase):
                 self.assertEqual(saved_job["status"], "completed")
                 self.assertEqual(saved_job["result_text"], "generated Myanmar recap")
                 self.assertEqual(saved_job["output_url"], "/renders/recap.mp4")
+                self.assertEqual(recap_dub.call_args.kwargs["mode"], "recap")
+                self.assertEqual(recap_dub.call_args.kwargs["voice"], "my-MM-NilarNeural")
+                self.assertEqual(design.call_args.args[2].get("template_ratio", "16:9"), "16:9")
             finally:
                 job_store.DATABASE_PATH = original_database
 
