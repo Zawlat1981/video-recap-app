@@ -9,7 +9,14 @@ export type RenderOperation =
   | "auto-cut-silence"
   | "magic-resize"
   | "remove-green-screen"
-  | "batch-export";
+  | "batch-export"
+  | "ai-script"
+  | "auto-highlights"
+  | "subtitle-timing"
+  | "angel-chat"
+  | "seo-metadata"
+  | "export-pro"
+  | "export-pro-batch";
 
 export type RenderJob = {
   id: string;

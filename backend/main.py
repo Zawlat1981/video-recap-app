@@ -26,6 +26,15 @@ from backend.job_store import (
     update_job,
 )
 from backend.elements import render_element
+from backend.ai_pro import (
+    auto_cut_highlights,
+    generate_recap_scenes,
+    generate_seo_metadata,
+    segments_to_srt,
+    suggest_editor_changes,
+    transcribe_segments,
+)
+from backend.export_pro import export_video as export_video_pro
 from backend.magic_tools import (
     auto_cut_silence,
     create_image_video,
@@ -134,6 +143,13 @@ class CreateRenderJobRequest(BaseModel):
         "magic-resize",
         "remove-green-screen",
         "batch-export",
+        "ai-script",
+        "auto-highlights",
+        "subtitle-timing",
+        "angel-chat",
+        "seo-metadata",
+        "export-pro",
+        "export-pro-batch",
     ]
     mode: Literal["recap", "dubbing"] = "recap"
     segment_seconds: Literal[30, 60, 120] = 60
@@ -177,6 +193,20 @@ class CreateRenderJobRequest(BaseModel):
     batch_upload_ids: list[str] = Field(default_factory=list, max_length=10)
     minimum_silence: float = Field(default=1, ge=1, le=10)
     silence_threshold_db: int = Field(default=-40, ge=-60, le=-20)
+    ai_script_seconds: int = Field(default=60, ge=30, le=120)
+    ai_language: Literal["th", "my", "en"] = "th"
+    ai_prompt: str = Field(default="", max_length=2000)
+    ai_context: str = Field(default="", max_length=4000)
+    ai_script: str = Field(default="", max_length=12000)
+    target_seconds: int = Field(default=60, ge=15, le=60)
+    export_preset: Literal[
+        "youtube-1080",
+        "youtube-4k",
+        "tiktok",
+        "youtube-shorts",
+        "instagram-square",
+        "facebook-portrait",
+    ] = "tiktok"
 
 
 def extract_audio(job_id: str, source_path: Path) -> Path:
@@ -869,7 +899,13 @@ def apply_video_design(job_id: str, source_path: Path, parameters: dict[str, obj
             overlay_file.unlink(missing_ok=True)
 
 
-def export_batch(job_id: str, upload_ids: list[str], parameters: dict[str, object]) -> Path:
+def export_batch(
+    job_id: str,
+    upload_ids: list[str],
+    parameters: dict[str, object],
+    *,
+    export_preset: str | None = None,
+) -> Path:
     if not 1 <= len(upload_ids) <= 10:
         raise ValueError("Batch export accepts between one and ten videos.")
     output_path = RENDER_DIRECTORY / f"{job_id}-batch.zip"
@@ -878,9 +914,34 @@ def export_batch(job_id: str, upload_ids: list[str], parameters: dict[str, objec
     try:
         for index, upload_id in enumerate(upload_ids):
             source_path = find_uploaded_video(upload_id)
-            rendered_paths.append(
-                apply_video_design(f"{job_id}-batch-{index}", source_path, parameters)
+            design_parameters = dict(parameters)
+            preset = export_preset or ""
+            if preset in {"tiktok", "youtube-shorts"}:
+                design_parameters["template_ratio"] = "9:16"
+            if design_parameters.pop("face_center", False):
+                design_parameters["face_center_x"] = estimate_face_center_x(source_path)
+            designed_path = apply_video_design(
+                f"{job_id}-batch-{index}",
+                source_path,
+                design_parameters,
             )
+            if export_preset:
+                try:
+                    exported_path = export_video_pro(
+                        f"{job_id}-batch-{index}",
+                        designed_path,
+                        preset=export_preset,
+                        render_directory=RENDER_DIRECTORY,
+                        work_directory=WORK_DIRECTORY,
+                    )
+                except Exception:
+                    designed_path.unlink(missing_ok=True)
+                    raise
+                if exported_path != designed_path:
+                    designed_path.unlink(missing_ok=True)
+                rendered_paths.append(exported_path)
+            else:
+                rendered_paths.append(designed_path)
         with ZipFile(temporary_path, "w", compression=ZIP_STORED) as archive:
             for index, render_path in enumerate(rendered_paths, start=1):
                 archive.write(render_path, arcname=f"video-{index:02d}.mp4")
@@ -909,7 +970,14 @@ async def render_worker(stop_event: asyncio.Event) -> None:
             operation = job["operation"]
             parameters = job["parameters"]
             result_text = None
-            source_path = None if operation in {"image-to-video", "batch-export"} else find_uploaded_video(job["upload_id"])
+            output_path: Path | None = None
+            source_path = None if operation in {
+                "image-to-video",
+                "batch-export",
+                "export-pro-batch",
+                "angel-chat",
+                "seo-metadata",
+            } else find_uploaded_video(job["upload_id"])
             if operation == "image-to-video":
                 image_ids = parameters.get("image_asset_ids", [])
                 if not isinstance(image_ids, list):
@@ -934,6 +1002,83 @@ async def render_worker(stop_event: asyncio.Event) -> None:
                     batch_upload_ids,
                     parameters,
                 )
+            elif operation == "export-pro-batch":
+                batch_upload_ids = parameters.get("batch_upload_ids", [])
+                if not isinstance(batch_upload_ids, list):
+                    raise RuntimeError("Pro batch export requires a list of video uploads.")
+                output_path = await asyncio.to_thread(
+                    export_batch,
+                    job["id"],
+                    batch_upload_ids,
+                    parameters,
+                    export_preset=parameters.get("export_preset", "tiktok"),
+                )
+            elif operation == "ai-script":
+                transcript_segments = await asyncio.to_thread(
+                    transcribe_segments,
+                    source_path,
+                    language=parameters.get("ai_language", "th"),
+                    work_directory=WORK_DIRECTORY,
+                )
+                result_text = await asyncio.to_thread(
+                    generate_recap_scenes,
+                    transcript_segments,
+                    parameters.get("ai_script_seconds", 60),
+                )
+            elif operation == "subtitle-timing":
+                transcript_segments = await asyncio.to_thread(
+                    transcribe_segments,
+                    source_path,
+                    language=parameters.get("ai_language", "th"),
+                    work_directory=WORK_DIRECTORY,
+                )
+                result_text = segments_to_srt(transcript_segments)
+            elif operation == "auto-highlights":
+                output_path = await asyncio.to_thread(
+                    auto_cut_highlights,
+                    job["id"],
+                    source_path,
+                    render_directory=RENDER_DIRECTORY,
+                    work_directory=WORK_DIRECTORY,
+                    target_seconds=parameters.get("target_seconds", 60),
+                )
+            elif operation == "angel-chat":
+                result_text = await asyncio.to_thread(
+                    suggest_editor_changes,
+                    parameters.get("ai_prompt", ""),
+                    parameters.get("ai_context", ""),
+                )
+            elif operation == "seo-metadata":
+                result_text = await asyncio.to_thread(
+                    generate_seo_metadata,
+                    parameters.get("ai_script", ""),
+                )
+            elif operation == "export-pro":
+                design_parameters = dict(parameters)
+                if design_parameters.get("export_preset") in {"tiktok", "youtube-shorts"}:
+                    design_parameters["template_ratio"] = "9:16"
+                if design_parameters.pop("face_center", False):
+                    design_parameters["face_center_x"] = await asyncio.to_thread(
+                        estimate_face_center_x,
+                        source_path,
+                    )
+                designed_path = await asyncio.to_thread(
+                    apply_video_design,
+                    job["id"],
+                    source_path,
+                    design_parameters,
+                )
+                try:
+                    output_path = await asyncio.to_thread(
+                        export_video_pro,
+                        job["id"],
+                        designed_path,
+                        preset=parameters.get("export_preset", "tiktok"),
+                        render_directory=RENDER_DIRECTORY,
+                        work_directory=WORK_DIRECTORY,
+                    )
+                finally:
+                    designed_path.unlink(missing_ok=True)
             elif operation == "auto-cut-silence":
                 output_path = await asyncio.to_thread(
                     auto_cut_silence,
@@ -1010,6 +1155,7 @@ async def render_worker(stop_event: asyncio.Event) -> None:
                 "transcribe-audio",
                 "auto-cut-silence",
                 "image-to-video",
+                "auto-highlights",
             }:
                 rendered_output_path = output_path
                 try:
@@ -1027,7 +1173,7 @@ async def render_worker(stop_event: asyncio.Event) -> None:
             update_job(
                 job["id"],
                 status="completed",
-                output_url=f"/renders/{output_path.name}",
+                output_url=f"/renders/{output_path.name}" if output_path is not None else None,
                 result_text=result_text,
             )
         except Exception as error:
@@ -1194,13 +1340,18 @@ async def create_render_job(
             raise HTTPException(status_code=422, detail="Upload at least one image to create a video.")
         for asset_id in request.image_asset_ids:
             find_uploaded_asset(asset_id, "image")
-    elif request.operation == "batch-export":
+    elif request.operation in {"batch-export", "export-pro-batch"}:
         if not request.batch_upload_ids:
             raise HTTPException(status_code=422, detail="Choose at least one video for batch export.")
         if len(set(request.batch_upload_ids)) != len(request.batch_upload_ids):
             raise HTTPException(status_code=422, detail="Batch video selections must be unique.")
         for upload_id in request.batch_upload_ids:
             find_uploaded_video(upload_id)
+    elif request.operation in {"angel-chat", "seo-metadata"}:
+        if request.operation == "angel-chat" and not request.ai_prompt.strip():
+            raise HTTPException(status_code=422, detail="Enter an Angel chat prompt.")
+        if request.operation == "seo-metadata" and not request.ai_script.strip():
+            raise HTTPException(status_code=422, detail="Enter a script before generating metadata.")
     else:
         if not request.upload_id or request.upload_id == "0" * 32:
             raise HTTPException(status_code=422, detail="Upload a video before starting this operation.")
