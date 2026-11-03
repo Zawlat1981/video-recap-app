@@ -28,6 +28,8 @@ import {
 } from "lucide-react";
 import { ChangeEvent, DragEvent, FormEvent, useEffect, useRef, useState } from "react";
 import { AngelChatBubble, AngelHalo } from "../components/AngelHalo";
+import { Phase2Studio } from "../components/Phase2Studio";
+import type { RenderJob } from "../lib/phase2";
 
 const MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024;
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
@@ -49,15 +51,7 @@ const tools = [
 
 type UploadState = "idle" | "uploading" | "uploaded" | "error";
 type VoiceoverMode = "recap" | "dubbing";
-type TextAnimation = "none" | "fade" | "slide" | "pop";
-type RenderJob = {
-  id: string;
-  operation: "extract-audio" | "burn-subtitles" | "split-video" | "create-recap-dub" | "hide-sub" | "export-video";
-  status: "queued" | "running" | "completed" | "failed";
-  result_text: string | null;
-  output_url: string | null;
-  error: string | null;
-};
+type TextAnimation = "none" | "fade" | "slide" | "pop" | "typewriter";
 
 type Phase1Action = "audio-myanmar" | "subtitle" | "hide-sub";
 type AngelMessage = { role: "angel" | "user"; text: string };
@@ -76,6 +70,11 @@ const renderMessages: Record<RenderJob["operation"], { running: string; complete
   "create-recap-dub": { running: "Creating the Burmese voiceover...", completed: "Burmese voiceover complete", extension: "MP4" },
   "hide-sub": { running: "Hiding the original subtitles...", completed: "Original subtitles hidden", extension: "MP4" },
   "export-video": { running: "Exporting the video design...", completed: "Video design export complete", extension: "MP4" },
+  "image-to-video": { running: "Creating a Ken Burns image video...", completed: "Image video export complete", extension: "MP4" },
+  "auto-cut-silence": { running: "Detecting and removing long pauses...", completed: "Silence cut complete", extension: "MP4" },
+  "magic-resize": { running: "Resizing and centering the video...", completed: "Magic resize complete", extension: "MP4" },
+  "remove-green-screen": { running: "Keying the green-screen background...", completed: "Green-screen key complete", extension: "MP4" },
+  "batch-export": { running: "Applying the design to each video...", completed: "Batch export complete", extension: "ZIP" },
 };
 
 function formatBytes(bytes: number) {
@@ -802,6 +801,7 @@ export default function Home() {
               <option value="fade">Fade in</option>
               <option value="slide">Slide in</option>
               <option value="pop">Pop in</option>
+              <option value="typewriter">Typewriter</option>
             </select>
             <select aria-label="Text position" value={textPosition} onChange={(event) => setTextPosition(event.target.value as typeof textPosition)}>
               <option value="top">Top</option>
@@ -844,6 +844,19 @@ export default function Home() {
           </article>
         </div>
       </section>
+
+      <Phase2Studio
+        uploadId={uploadId}
+        renderBusy={renderBusy}
+        templateRatio={templateRatio}
+        textOverlay={textOverlay}
+        textAnimation={textAnimation}
+        textPosition={textPosition}
+        textSize={textSize}
+        textColor={textColor}
+        onJob={setRenderJob}
+        onError={setError}
+      />
 
       <section className="toolkit-section" id="toolkit">
         <div className="section-title-row">
