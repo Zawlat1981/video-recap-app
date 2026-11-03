@@ -1,5 +1,7 @@
 import asyncio
+import io
 import os
+import re
 import sqlite3
 import subprocess
 import tempfile
@@ -8,8 +10,11 @@ import uuid
 from contextlib import closing
 from pathlib import Path
 from unittest.mock import Mock, patch
+from zipfile import ZipFile
 
 import imageio_ffmpeg
+from PIL import Image
+from starlette.datastructures import UploadFile
 
 from backend import job_store
 from backend import main
@@ -312,6 +317,190 @@ class VideoDesignExportTests(unittest.TestCase):
                     self.assertIn("Video: h264", probe.stderr)
                     self.assertIn(expected_size, probe.stderr)
                     output_path.unlink()
+
+    def test_elements_typewriter_logo_and_audio_mix_render(self) -> None:
+        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_path = root / "source.mp4"
+            assets = root / "assets"
+            renders = root / "renders"
+            working = root / "working"
+            for path in (assets, renders, working):
+                path.mkdir()
+            logo_id = uuid.uuid4().hex
+            bgm_id = uuid.uuid4().hex
+            logo_path = assets / f"{logo_id}.png"
+            Image.new("RGBA", (64, 64), (255, 102, 0, 180)).save(logo_path)
+            bgm_path = assets / f"{bgm_id}.wav"
+            subprocess.run(
+                [
+                    ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                    "sine=frequency=220:duration=1", "-y", str(bgm_path),
+                ],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                [
+                    ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                    "color=c=teal:s=320x180:d=1:r=12", "-f", "lavfi", "-i",
+                    "sine=frequency=440:duration=1", "-shortest", "-c:v", "libx264",
+                    "-pix_fmt", "yuv420p", "-c:a", "aac", "-y", str(source_path),
+                ],
+                check=True,
+                capture_output=True,
+            )
+            with patch.object(main, "ASSET_DIRECTORY", assets), patch.object(
+                main, "RENDER_DIRECTORY", renders
+            ), patch.object(main, "WORK_DIRECTORY", working):
+                output = main.apply_video_design(
+                    uuid.uuid4().hex,
+                    source_path,
+                    {
+                        "template_ratio": "16:9",
+                        "text_overlay": "မင်္ဂလာပါ",
+                        "text_animation": "typewriter",
+                        "text_position": "center",
+                        "text_size": 30,
+                        "text_color": "white",
+                        "elements": [{
+                            "kind": "heart", "x": 0.2, "y": 0.3, "scale": 0.8,
+                            "rotation": 10, "start_seconds": 0, "end_seconds": 1,
+                        }],
+                        "logo_asset_id": logo_id,
+                        "logo_enabled": True,
+                        "logo_opacity": 0.8,
+                        "logo_scale": 0.15,
+                        "bgm_asset_id": bgm_id,
+                        "bgm_volume": 0.2,
+                        "bgm_ducking": True,
+                    },
+                )
+            probe = subprocess.run(
+                [ffmpeg, "-hide_banner", "-i", str(output)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertIn("Video: h264", probe.stderr)
+            self.assertIn("Audio: aac", probe.stderr)
+            output.unlink()
+
+
+class Phase2PipelineTests(unittest.TestCase):
+    def test_image_video_supports_pan_preset(self) -> None:
+        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            image_path = root / "poster.png"
+            renders = root / "renders"
+            working = root / "working"
+            renders.mkdir()
+            working.mkdir()
+            Image.new("RGB", (480, 320), (70, 120, 180)).save(image_path)
+
+            output = main.create_image_video(
+                uuid.uuid4().hex,
+                [image_path],
+                render_directory=renders,
+                work_directory=working,
+                duration_seconds=3,
+                motion="pan-left",
+            )
+            probe = subprocess.run(
+                [ffmpeg, "-hide_banner", "-i", str(output)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertIn("Video: h264", probe.stderr)
+            self.assertIn("1920x1080", probe.stderr)
+            output.unlink()
+
+    def test_auto_cut_silence_removes_middle_pause(self) -> None:
+        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.mp4"
+            renders = root / "renders"
+            working = root / "working"
+            renders.mkdir()
+            working.mkdir()
+            subprocess.run(
+                [
+                    ffmpeg, "-hide_banner", "-loglevel", "error",
+                    "-f", "lavfi", "-i", "color=c=teal:s=320x180:d=3.5:r=12",
+                    "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+                    "-f", "lavfi", "-i", "anullsrc=r=48000:cl=mono:d=1.5",
+                    "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+                    "-filter_complex", "[1:a][2:a][3:a]concat=n=3:v=0:a=1[a]",
+                    "-map", "0:v", "-map", "[a]", "-c:v", "libx264",
+                    "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", "-y", str(source),
+                ],
+                check=True,
+                capture_output=True,
+            )
+            output = main.auto_cut_silence(
+                uuid.uuid4().hex,
+                source,
+                render_directory=renders,
+                work_directory=working,
+            )
+            probe = subprocess.run(
+                [ffmpeg, "-hide_banner", "-i", str(output)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertIn("Audio: aac", probe.stderr)
+            duration = re.search(r"Duration:\s*\d+:\d+:(\d+(?:\.\d+)?)", probe.stderr)
+            self.assertIsNotNone(duration)
+            self.assertLess(float(duration.group(1)), 3.0)
+            output.unlink()
+
+    def test_batch_export_writes_each_video_to_zip(self) -> None:
+        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            uploads = root / "uploads"
+            renders = root / "renders"
+            working = root / "working"
+            for path in (uploads, renders, working):
+                path.mkdir()
+            upload_ids = [uuid.uuid4().hex for _ in range(2)]
+            for upload_id in upload_ids:
+                subprocess.run(
+                    [
+                        ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                        "color=c=teal:s=320x180:d=0.5:r=12", "-c:v", "libx264",
+                        "-pix_fmt", "yuv420p", "-y", str(uploads / f"{upload_id}.mp4"),
+                    ],
+                    check=True,
+                    capture_output=True,
+                )
+            with patch.object(main, "UPLOAD_DIRECTORY", uploads), patch.object(
+                main, "RENDER_DIRECTORY", renders
+            ), patch.object(main, "WORK_DIRECTORY", working):
+                output = main.export_batch(
+                    uuid.uuid4().hex,
+                    upload_ids,
+                    {"template_ratio": "1:1", "text_overlay": ""},
+                )
+            with ZipFile(output) as archive:
+                self.assertEqual(archive.namelist(), ["video-01.mp4", "video-02.mp4"])
+            output.unlink()
+
+    def test_image_asset_upload_stores_supported_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            assets = Path(directory)
+            image_bytes = io.BytesIO()
+            Image.new("RGBA", (8, 8), (255, 102, 0, 255)).save(image_bytes, format="PNG")
+            upload = UploadFile(filename="brand.png", file=io.BytesIO(image_bytes.getvalue()))
+            with patch.object(main, "ASSET_DIRECTORY", assets):
+                result = asyncio.run(main.upload_asset(upload, category="image"))
+            self.assertEqual(result["category"], "image")
+            self.assertTrue((assets / f"{result['id']}.png").is_file())
 
 
 class JobStoreMigrationTests(unittest.TestCase):
