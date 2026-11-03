@@ -30,6 +30,7 @@ import { ChangeEvent, DragEvent, FormEvent, useEffect, useRef, useState } from "
 import { AngelChatBubble, AngelHalo } from "../components/AngelHalo";
 import { Phase2Studio } from "../components/Phase2Studio";
 import type { RenderJob } from "../lib/phase2";
+import type { CreatorTemplate } from "../lib/templates";
 
 const MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024;
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
@@ -75,6 +76,13 @@ const renderMessages: Record<RenderJob["operation"], { running: string; complete
   "magic-resize": { running: "Resizing and centering the video...", completed: "Magic resize complete", extension: "MP4" },
   "remove-green-screen": { running: "Keying the green-screen background...", completed: "Green-screen key complete", extension: "MP4" },
   "batch-export": { running: "Applying the design to each video...", completed: "Batch export complete", extension: "ZIP" },
+  "ai-script": { running: "Transcribing dialogue and drafting recap scenes...", completed: "AI recap script complete", extension: "JSON" },
+  "auto-highlights": { running: "Scoring audio and assembling highlight moments...", completed: "Highlight reel complete", extension: "MP4" },
+  "subtitle-timing": { running: "Transcribing speech and aligning subtitle cues...", completed: "Timed subtitles complete", extension: "SRT" },
+  "angel-chat": { running: "Angel is preparing editor suggestions...", completed: "Angel suggestions ready", extension: "TEXT" },
+  "seo-metadata": { running: "Writing Burmese title and description...", completed: "YouTube metadata ready", extension: "JSON" },
+  "export-pro": { running: "Applying the selected export profile...", completed: "Pro export complete", extension: "MP4" },
+  "export-pro-batch": { running: "Rendering the pro batch queue...", completed: "Pro batch export complete", extension: "ZIP" },
 };
 
 function formatBytes(bytes: number) {
@@ -115,6 +123,7 @@ export default function Home() {
   const [textPosition, setTextPosition] = useState<"top" | "center" | "bottom">("bottom");
   const [textSize, setTextSize] = useState(48);
   const [textColor, setTextColor] = useState<"white" | "yellow" | "cyan">("white");
+  const [appliedTemplate, setAppliedTemplate] = useState<CreatorTemplate | null>(null);
   const [chatInput, setChatInput] = useState("");
   const [chatMessages, setChatMessages] = useState<AngelMessage[]>([
     { role: "angel", text: "Mingalaba! Upload a video, then ask me to add subtitles, hide the original subtitles, or create a Burmese recap voiceover." },
@@ -539,7 +548,7 @@ export default function Home() {
                 {renderJob.status === "failed" && <><X size={15} /><span>{renderJob.error ?? "Render job failed."}</span></>}
               </div>
               {renderJob.output_url && <a className="download-link" href={new URL(renderJob.output_url, API_BASE_URL).toString()} download><Download size={14} /> Download {renderMessages[renderJob.operation].extension}</a>}
-              {renderJob.result_text && <label className="recap-result"><span>Generated Burmese voice text</span><textarea value={renderJob.result_text} readOnly rows={5} aria-label="Generated Burmese voice text" /></label>}
+              {renderJob.result_text && <label className="recap-result"><span>{renderJob.operation === "ai-script" ? "Generated recap scenes" : renderJob.operation === "subtitle-timing" ? "Timed subtitle cues" : renderJob.operation === "seo-metadata" ? "YouTube metadata" : renderJob.operation === "angel-chat" ? "Angel suggestions" : "Generated Burmese voice text"}</span><textarea value={renderJob.result_text} readOnly rows={5} aria-label="Generated result" /></label>}
             </div>
           )}
 
@@ -848,6 +857,8 @@ export default function Home() {
       <Phase2Studio
         uploadId={uploadId}
         renderBusy={renderBusy}
+        job={renderJob}
+        appliedTemplate={appliedTemplate}
         templateRatio={templateRatio}
         textOverlay={textOverlay}
         textAnimation={textAnimation}
@@ -856,6 +867,15 @@ export default function Home() {
         textColor={textColor}
         onJob={setRenderJob}
         onError={setError}
+        onTemplateApply={(template: CreatorTemplate) => {
+          setAppliedTemplate({ ...template });
+          setTemplateRatio(template.ratio);
+          setTextOverlay(template.textOverlay);
+          setTextAnimation(template.textAnimation);
+          setTextColor(template.textColor);
+        }}
+        onApplyScript={setTextOverlay}
+        onApplySubtitles={setSubtitleSrt}
       />
 
       <section className="toolkit-section" id="toolkit">

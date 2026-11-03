@@ -13,6 +13,10 @@ const elementKinds = [
   "tractor", "lower-third", "bubble",
 ] as const;
 const imageMotions = ["zoom-in", "zoom-out", "pan-left", "pan-right", "zoom-pan"] as const;
+const exportPresets = [
+  "youtube-1080", "youtube-4k", "tiktok", "youtube-shorts", "instagram-square", "facebook-portrait",
+] as const;
+const aiLanguages = ["th", "my", "en"] as const;
 
 const features = [
   { id: "audio-myanmar", name: "Recap TTS and direct dubbing", execution: "backend" },
@@ -26,6 +30,9 @@ const features = [
   { id: "audio-mix", name: "Background music and sound effects", execution: "backend" },
   { id: "image-to-video", name: "Image slideshow and Ken Burns export", execution: "backend" },
   { id: "magic-tools", name: "Silence cut, resize, chroma key, and batch export", execution: "backend" },
+  { id: "templates-pro", name: "24 creator templates with local custom presets", execution: "frontend" },
+  { id: "ai-pro", name: "Whisper recap scripts, timed subtitles, highlights, and Angel", execution: "backend" },
+  { id: "export-pro", name: "YouTube, TikTok, Instagram, Facebook, and 4K exports", execution: "backend" },
 ] as const;
 
 function formText(formData: FormData, key: string, fallback = "") {
@@ -86,7 +93,7 @@ function validSoundEffects(items: unknown[]) {
 }
 
 export async function GET() {
-  return NextResponse.json({ phase: "Phase 2", features });
+  return NextResponse.json({ phase: "Phase 3", features });
 }
 
 export async function POST(request: NextRequest) {
@@ -99,9 +106,10 @@ export async function POST(request: NextRequest) {
 
   const action = formText(formData, "action");
   const uploadId = formText(formData, "upload_id");
-  const usesBatchUploads = action === "batch-export";
+  const usesBatchUploads = action === "batch-export" || action === "export-pro-batch";
   const usesImageAssets = action === "image-to-video";
-  if (!usesBatchUploads && !usesImageAssets && !/^[a-f0-9]{32}$/.test(uploadId)) {
+  const usesNoVideo = action === "angel-chat" || action === "seo-metadata";
+  if (!usesBatchUploads && !usesImageAssets && !usesNoVideo && !/^[a-f0-9]{32}$/.test(uploadId)) {
     return NextResponse.json({ detail: "Upload a video before starting this action." }, { status: 400 });
   }
 
@@ -281,6 +289,64 @@ export async function POST(request: NextRequest) {
       batch_upload_ids: batchUploadIds,
       ...designOptions,
     };
+  } else if (action === "ai-script") {
+    const duration = integerField(formData, "ai_script_seconds", 60);
+    const language = formText(formData, "ai_language", "th");
+    if (!Number.isInteger(duration) || duration < 30 || duration > 120
+      || !aiLanguages.includes(language as (typeof aiLanguages)[number])) {
+      return NextResponse.json({ detail: "AI recap language or duration is invalid." }, { status: 422 });
+    }
+    payload = { upload_id: uploadId, operation: action, ai_script_seconds: duration, ai_language: language };
+  } else if (action === "subtitle-timing") {
+    const language = formText(formData, "ai_language", "th");
+    if (!aiLanguages.includes(language as (typeof aiLanguages)[number])) {
+      return NextResponse.json({ detail: "Choose a supported subtitle transcription language." }, { status: 422 });
+    }
+    payload = { upload_id: uploadId, operation: action, ai_language: language };
+  } else if (action === "auto-highlights") {
+    const targetSeconds = integerField(formData, "target_seconds", 60);
+    if (!Number.isInteger(targetSeconds) || targetSeconds < 15 || targetSeconds > 60) {
+      return NextResponse.json({ detail: "Highlight duration must be between 15 and 60 seconds." }, { status: 422 });
+    }
+    payload = { upload_id: uploadId, operation: action, target_seconds: targetSeconds };
+  } else if (action === "angel-chat") {
+    const prompt = formText(formData, "ai_prompt").trim();
+    const context = formText(formData, "ai_context");
+    if (!prompt || prompt.length > 2000 || context.length > 4000) {
+      return NextResponse.json({ detail: "Angel prompts and editor context are invalid." }, { status: 422 });
+    }
+    payload = { upload_id: "0".repeat(32), operation: action, ai_prompt: prompt, ai_context: context };
+  } else if (action === "seo-metadata") {
+    const script = formText(formData, "ai_script").trim();
+    if (!script || script.length > 12000) {
+      return NextResponse.json({ detail: "Enter a recap script up to 12,000 characters." }, { status: 422 });
+    }
+    payload = { upload_id: "0".repeat(32), operation: action, ai_script: script };
+  } else if (action === "export-pro" || action === "export-pro-batch") {
+    const preset = formText(formData, "export_preset", "tiktok");
+    if (!exportPresets.includes(preset as (typeof exportPresets)[number])) {
+      return NextResponse.json({ detail: "Choose a supported export preset." }, { status: 422 });
+    }
+    const presetOptions = {
+      export_preset: preset,
+      face_center: booleanField(formData, "face_center"),
+      ...designOptions,
+    };
+    if (action === "export-pro") {
+      payload = { upload_id: uploadId, operation: action, ...presetOptions };
+    } else {
+      const batchUploadIds = jsonArray(formData, "batch_upload_ids", 10);
+      if (!batchUploadIds || batchUploadIds.length < 1
+        || batchUploadIds.some((id) => typeof id !== "string" || !/^[a-f0-9]{32}$/.test(id))) {
+        return NextResponse.json({ detail: "Select one to ten valid videos for pro batch export." }, { status: 422 });
+      }
+      payload = {
+        upload_id: "0".repeat(32),
+        operation: action,
+        batch_upload_ids: batchUploadIds,
+        ...presetOptions,
+      };
+    }
   } else {
     return NextResponse.json({ detail: "This action is not available as a server render." }, { status: 400 });
   }

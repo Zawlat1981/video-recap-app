@@ -6,7 +6,9 @@ import { BrandKitPanel } from "./BrandKitPanel";
 import { ElementsPanel } from "./ElementsPanel";
 import { ImageToVideoPanel } from "./ImageToVideoPanel";
 import { MagicToolsPanel } from "./MagicToolsPanel";
+import { Phase3Studio } from "./Phase3Studio";
 import type { AssetInfo, ElementOverlay, RenderJob, RenderOperation } from "../lib/phase2";
+import type { CreatorTemplate } from "../lib/templates";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 const tabs = [
@@ -26,12 +28,18 @@ type Props = {
   textPosition: "top" | "center" | "bottom";
   textSize: number;
   textColor: "white" | "yellow" | "cyan";
+  job: RenderJob | null;
+  appliedTemplate: CreatorTemplate | null;
   onJob: (job: RenderJob) => void;
   onError: (message: string | null) => void;
+  onTemplateApply: (template: CreatorTemplate) => void;
+  onApplyScript: (text: string) => void;
+  onApplySubtitles: (srt: string) => void;
 };
 
 export function Phase2Studio({
-  uploadId, renderBusy, templateRatio, textOverlay, textAnimation, textPosition, textSize, textColor, onJob, onError,
+  uploadId, renderBusy, templateRatio, textOverlay, textAnimation, textPosition, textSize, textColor, job, appliedTemplate, onJob, onError,
+  onTemplateApply, onApplyScript, onApplySubtitles,
 }: Props) {
   const [activeTab, setActiveTab] = useState<(typeof tabs)[number]["id"]>("elements");
   const [elements, setElements] = useState<ElementOverlay[]>([]);
@@ -53,6 +61,39 @@ export function Phase2Studio({
   const [imageMotion, setImageMotion] = useState("zoom-in");
   const [batchVideos, setBatchVideos] = useState<{ id: string; filename: string }[]>([]);
   const [batchBusy, setBatchBusy] = useState(false);
+  const currentTemplate: CreatorTemplate = {
+    id: "current-editor-settings",
+    name: "Current editor settings",
+    category: "Custom",
+    description: "Save the current text, ratio, elements, and brand settings",
+    ratio: templateRatio,
+    textAnimation,
+    textColor,
+    brandPrimary: primary,
+    brandBackground: background,
+    textOverlay,
+    introEnabled,
+    outroEnabled,
+    fontId,
+    logo,
+    logoEnabled,
+    logoOpacity,
+    logoScale,
+    bgm,
+    bgmVolume,
+    bgmDucking: ducking,
+    elements: elements.map((element) => ({
+      kind: element.kind,
+      x: element.x,
+      y: element.y,
+      scale: element.scale,
+      rotation: element.rotation,
+      start_seconds: element.start_seconds,
+      end_seconds: element.end_seconds,
+      text: element.text,
+      subtitle: element.subtitle,
+    })),
+  };
 
   async function uploadAsset(file: File, category: "image" | "audio"): Promise<AssetInfo> {
     const formData = new FormData();
@@ -120,7 +161,10 @@ export function Phase2Studio({
     extra: Record<string, string | number | boolean | string[]> = {},
   ) {
     if (renderBusy) return;
-    if (action !== "image-to-video" && action !== "batch-export" && !uploadId) {
+    const needsBatch = action === "batch-export" || action === "export-pro-batch";
+    const needsVideo = action !== "image-to-video" && !needsBatch
+      && action !== "angel-chat" && action !== "seo-metadata";
+    if (needsVideo && !uploadId) {
       onError("Upload a source video before starting this operation.");
       return;
     }
@@ -168,6 +212,7 @@ export function Phase2Studio({
   }
 
   return (
+    <>
     <section className="phase2-section panel" id="phase2" aria-labelledby="phase2-title">
       <div className="phase2-heading">
         <div><span className="section-kicker">PHASE 2 / CREATOR TOOLS</span><h2 id="phase2-title">Build your video’s look and sound</h2></div>
@@ -244,5 +289,33 @@ export function Phase2Studio({
       {activeTab === "audio" && <button className="button button-primary phase2-export-button" type="button" disabled={!uploadId || renderBusy} onClick={() => void submit("export-video")}>Export with audio tracks</button>}
       {activeTab === "magic" && batchVideos.length > 0 && <div className="phase2-batch-list">{batchVideos.map((video) => <span key={video.id}>{video.filename}<button type="button" aria-label={`Remove ${video.filename}`} onClick={() => setBatchVideos((current) => current.filter((item) => item.id !== video.id))}>×</button></span>)}</div>}
     </section>
+    <Phase3Studio
+      hasVideo={Boolean(uploadId)}
+      busy={renderBusy}
+      job={job}
+      currentTemplate={currentTemplate}
+      appliedTemplateId={appliedTemplate?.id ?? null}
+      editorContext={`Aspect ratio: ${templateRatio}\nPrimary color: ${primary}\nText animation: ${textAnimation}`}
+      onTemplateApply={(template) => {
+        setPrimary(template.brandPrimary);
+        setBackground(template.brandBackground);
+        setIntroEnabled(template.introEnabled);
+        setOutroEnabled(template.outroEnabled);
+        if (template.fontId) setFontId(template.fontId);
+        if (template.logo) setLogo(template.logo);
+        setLogoEnabled(template.logoEnabled);
+        setLogoOpacity(template.logoOpacity);
+        setLogoScale(template.logoScale);
+        if (template.bgm) setBgm(template.bgm);
+        setBgmVolume(template.bgmVolume);
+        setDucking(template.bgmDucking);
+        setElements(template.elements.map((element) => ({ ...element, id: crypto.randomUUID() })));
+        onTemplateApply(template);
+      }}
+      onRun={(operation, values) => void submit(operation, values)}
+      onApplyScript={onApplyScript}
+      onApplySubtitles={onApplySubtitles}
+    />
+    </>
   );
 }
