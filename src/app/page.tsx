@@ -10,18 +10,24 @@ import {
   Download,
   FileVideo,
   Film,
+  EyeOff,
+  LayoutTemplate,
   Languages,
   LoaderCircle,
+  MessageCircle,
   Mic2,
   MessageSquareText,
   Scissors,
   Settings2,
   Sparkles,
   Subtitles,
+  Type,
   Volume2,
+  Wand2,
   X,
 } from "lucide-react";
-import { ChangeEvent, DragEvent, useEffect, useRef, useState } from "react";
+import { ChangeEvent, DragEvent, FormEvent, useEffect, useRef, useState } from "react";
+import { AngelChatBubble, AngelHalo } from "../components/AngelHalo";
 
 const MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024;
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
@@ -42,13 +48,34 @@ const tools = [
 ] as const;
 
 type UploadState = "idle" | "uploading" | "uploaded" | "error";
+type VoiceoverMode = "recap" | "dubbing";
+type TextAnimation = "none" | "fade" | "slide" | "pop";
 type RenderJob = {
   id: string;
-  operation: "extract-audio" | "burn-subtitles" | "split-video" | "create-recap-dub";
+  operation: "extract-audio" | "burn-subtitles" | "split-video" | "create-recap-dub" | "hide-sub" | "export-video";
   status: "queued" | "running" | "completed" | "failed";
   result_text: string | null;
   output_url: string | null;
   error: string | null;
+};
+
+type Phase1Action = "audio-myanmar" | "subtitle" | "hide-sub";
+type AngelMessage = { role: "angel" | "user"; text: string };
+type TemplateRatio = "16:9" | "9:16" | "1:1";
+
+const templateAspectRatios: Record<TemplateRatio, string> = {
+  "16:9": "16 / 9",
+  "9:16": "9 / 16",
+  "1:1": "1 / 1",
+};
+
+const renderMessages: Record<RenderJob["operation"], { running: string; completed: string; extension: string }> = {
+  "extract-audio": { running: "Extracting audio on the server...", completed: "Audio extraction complete", extension: "MP3" },
+  "burn-subtitles": { running: "Rendering subtitles on the server...", completed: "Subtitle render complete", extension: "MP4" },
+  "split-video": { running: "Splitting video on the server...", completed: "Video split complete", extension: "ZIP" },
+  "create-recap-dub": { running: "Creating the Burmese voiceover...", completed: "Burmese voiceover complete", extension: "MP4" },
+  "hide-sub": { running: "Hiding the original subtitles...", completed: "Original subtitles hidden", extension: "MP4" },
+  "export-video": { running: "Exporting the video design...", completed: "Video design export complete", extension: "MP4" },
 };
 
 function formatBytes(bytes: number) {
@@ -77,10 +104,23 @@ export default function Home() {
   const [outline, setOutline] = useState(2);
   const [segmentSeconds, setSegmentSeconds] = useState<30 | 60 | 120>(60);
   const [recapSeconds, setRecapSeconds] = useState<number>(600);
+  const [voiceoverMode, setVoiceoverMode] = useState<VoiceoverMode>("recap");
   const [voice, setVoice] = useState<"my-MM-NilarNeural" | "my-MM-ThihaNeural">("my-MM-NilarNeural");
   const [includeOriginalAudio, setIncludeOriginalAudio] = useState(true);
   const [backgroundVolume, setBackgroundVolume] = useState(20);
   const [error, setError] = useState<string | null>(null);
+  const [hideMethod, setHideMethod] = useState<"blur" | "blackbox" | "crop">("blur");
+  const [templateRatio, setTemplateRatio] = useState<TemplateRatio>("16:9");
+  const [textOverlay, setTextOverlay] = useState("");
+  const [textAnimation, setTextAnimation] = useState<TextAnimation>("none");
+  const [textPosition, setTextPosition] = useState<"top" | "center" | "bottom">("bottom");
+  const [textSize, setTextSize] = useState(48);
+  const [textColor, setTextColor] = useState<"white" | "yellow" | "cyan">("white");
+  const [chatInput, setChatInput] = useState("");
+  const [chatMessages, setChatMessages] = useState<AngelMessage[]>([
+    { role: "angel", text: "Mingalaba! Upload a video, then ask me to add subtitles, hide the original subtitles, or create a Burmese recap voiceover." },
+  ]);
+  const textOverlayRef = useRef<HTMLInputElement>(null);
   const activeJobId = renderJob?.id;
   const activeJobStatus = renderJob?.status;
   const renderBusy = startingJob || activeJobStatus === "queued" || activeJobStatus === "running";
@@ -246,11 +286,15 @@ export default function Home() {
     setError(null);
     try {
       const payload = operation === "burn-subtitles"
-        ? { upload_id: uploadId, operation, subtitle_srt: subtitleSrt, font_family: fontFamily, font_size: fontSize, font_color: fontColor, position: subtitlePosition, outline }
+        ? { upload_id: uploadId, operation, subtitle_srt: subtitleSrt, font_family: fontFamily, font_size: fontSize, font_color: fontColor, position: subtitlePosition, outline, template_ratio: templateRatio, text_overlay: textOverlay, text_animation: textAnimation, text_position: textPosition, text_size: textSize, text_color: textColor }
         : operation === "split-video"
           ? { upload_id: uploadId, operation, segment_seconds: segmentSeconds }
           : operation === "create-recap-dub"
-            ? { upload_id: uploadId, operation, subtitle_srt: subtitleSrt || undefined, voice, recap_seconds: recapSeconds, include_original_audio: includeOriginalAudio, background_volume: backgroundVolume }
+            ? { upload_id: uploadId, operation, mode: voiceoverMode, subtitle_srt: subtitleSrt || undefined, voice, recap_seconds: recapSeconds, include_original_audio: includeOriginalAudio, background_volume: backgroundVolume, template_ratio: templateRatio, text_overlay: textOverlay, text_animation: textAnimation, text_position: textPosition, text_size: textSize, text_color: textColor }
+            : operation === "hide-sub"
+              ? { upload_id: uploadId, operation, hide_method: hideMethod, template_ratio: templateRatio, text_overlay: textOverlay, text_animation: textAnimation, text_position: textPosition, text_size: textSize, text_color: textColor }
+              : operation === "export-video"
+                ? { upload_id: uploadId, operation, template_ratio: templateRatio, text_overlay: textOverlay, text_animation: textAnimation, text_position: textPosition, text_size: textSize, text_color: textColor }
             : { upload_id: uploadId, operation };
       const response = await fetch(`${API_BASE_URL}/api/jobs`, {
         method: "POST",
@@ -266,6 +310,133 @@ export default function Home() {
     } finally {
       setStartingJob(false);
     }
+  }
+
+  async function submitPhase1Action(action: Phase1Action): Promise<boolean> {
+    if (!uploadId || renderBusy) {
+      setError("Upload a video first and wait for the current render to finish.");
+      return false;
+    }
+    if (action === "subtitle" && !subtitleSrt.trim()) {
+      setError("Add SRT subtitle text before starting the subtitle render.");
+      return false;
+    }
+
+    const formData = new FormData();
+    formData.set("action", action);
+    formData.set("upload_id", uploadId);
+    if (action === "audio-myanmar") {
+      formData.set("subtitle_srt", subtitleSrt);
+      formData.set("voice", voice);
+      formData.set("mode", voiceoverMode);
+      formData.set("recap_seconds", String(recapSeconds));
+      formData.set("include_original_audio", String(includeOriginalAudio));
+      formData.set("background_volume", String(backgroundVolume));
+    } else if (action === "subtitle") {
+      formData.set("subtitle_srt", subtitleSrt);
+      formData.set("font_family", fontFamily);
+      formData.set("font_size", String(fontSize));
+      formData.set("font_color", fontColor);
+      formData.set("position", subtitlePosition);
+      formData.set("outline", String(outline));
+    } else {
+      formData.set("method", hideMethod);
+    }
+    formData.set("template_ratio", templateRatio);
+    formData.set("text_overlay", textOverlay);
+    formData.set("text_animation", textAnimation);
+    formData.set("text_position", textPosition);
+    formData.set("text_size", String(textSize));
+    formData.set("text_color", textColor);
+
+    setStartingJob(true);
+    setError(null);
+    try {
+      const response = await fetch("/api/video", { method: "POST", body: formData });
+      const result = await response.json() as RenderJob & { detail?: string };
+      if (!response.ok) throw new Error(result.detail ?? "The Phase 1 action could not be started.");
+      setRenderJob(result);
+      window.localStorage.setItem("recapkit-job-id", result.id);
+      return true;
+    } catch (actionError: unknown) {
+      setError(actionError instanceof Error ? actionError.message : "The Phase 1 action could not be started.");
+      return false;
+    } finally {
+      setStartingJob(false);
+    }
+  }
+
+  async function handleAngelCommand(message: string) {
+    const command = message.toLowerCase();
+    if (/hide|ဖျောက်|blur/.test(command)) {
+      const started = await submitPhase1Action("hide-sub");
+      setChatMessages((current) => [...current, {
+        role: "angel",
+        text: started ? "Original subtitle hiding is queued." : "I couldn't start that render. Check the message above and try again.",
+      }]);
+      return;
+    }
+    if (/subtitle|စာတန်း/.test(command)) {
+      const started = await submitPhase1Action("subtitle");
+      setChatMessages((current) => [...current, {
+        role: "angel",
+        text: started ? "Myanmar subtitle rendering is queued." : "I couldn't start that render. Add valid SRT text and try again.",
+      }]);
+      return;
+    }
+    if (/voice|audio|အသံ|dubb|translate|ဘာသာပြန်/.test(command)) {
+      const started = await submitPhase1Action("audio-myanmar");
+      setChatMessages((current) => [...current, {
+        role: "angel",
+        text: started
+          ? voiceoverMode === "recap"
+            ? "Your Burmese recap script voiceover is queued."
+            : "Your source dialogue will be transcribed in Thai, translated directly into Burmese, and voiced."
+          : "I couldn't start that render. Check the message above and try again.",
+      }]);
+      return;
+    }
+    if (/template|9\s*:\s*16|16\s*:\s*9|1\s*:\s*1|vertical|ဒေါင်လိုက်/.test(command)) {
+      const ratio: TemplateRatio = /9\s*:\s*16|vertical|ဒေါင်လိုက်/.test(command)
+        ? "9:16"
+        : /1\s*:\s*1/.test(command) ? "1:1" : "16:9";
+      setTemplateRatio(ratio);
+      setChatMessages((current) => [...current, {
+        role: "angel",
+        text: `Template set to ${ratio}. The blurred-background frame will be included when you export the video.`,
+      }]);
+      return;
+    }
+    if (/text|စာသား/.test(command)) {
+      const enteredText = message.replace(/^(?:text|စာသား)(?:\s+ထည့်)?\s*/i, "").trim();
+      if (enteredText) {
+        setTextOverlay(enteredText);
+        setChatMessages((current) => [...current, {
+          role: "angel",
+          text: "Text added. It will be burned into the video when you export it.",
+        }]);
+      } else {
+        textOverlayRef.current?.focus();
+        setChatMessages((current) => [...current, {
+          role: "angel",
+          text: "Type the text you want in the Text tool field, then export the video to burn it in.",
+        }]);
+      }
+      return;
+    }
+    setChatMessages((current) => [...current, {
+      role: "angel",
+      text: "Try a command such as “Myanmar voice”, “Subtitle ထိုးပေး”, “Original Sub ဖျောက်”, “Template 9:16”, or “Text ထည့် Hello”.",
+    }]);
+  }
+
+  function sendAngelMessage(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const message = chatInput.trim();
+    if (!message) return;
+    setChatInput("");
+    setChatMessages((current) => [...current, { role: "user", text: message }]);
+    void handleAngelCommand(message);
   }
 
   return (
@@ -323,7 +494,13 @@ export default function Home() {
           >
             {previewUrl ? (
               <div className="video-preview-wrap">
-                <video className="video-preview" src={previewUrl} controls playsInline />
+                <div
+                  className="video-preview-frame"
+                  style={{ aspectRatio: templateAspectRatios[templateRatio] }}
+                >
+                  <video className="video-preview" src={previewUrl} controls playsInline />
+                  {textOverlay.trim() && <span className="video-text-overlay">{textOverlay}</span>}
+                </div>
                 <div className="selected-file">
                   <span className="selected-file-icon"><FileVideo size={18} /></span>
                   <span className="selected-file-copy"><strong>{file?.name}</strong><small>{file ? formatBytes(file.size) : ""}</small></span>
@@ -358,12 +535,12 @@ export default function Home() {
             <div className="render-feedback" aria-live="polite">
               <div className={`job-state ${renderJob.status}`}>
                 {renderJob.status === "queued" && <><LoaderCircle className="spin" size={15} /><span>Render job queued...</span></>}
-                {renderJob.status === "running" && <><LoaderCircle className="spin" size={15} /><span>{renderJob.operation === "burn-subtitles" ? "Rendering subtitles on the server..." : renderJob.operation === "split-video" ? "Splitting video on the server..." : renderJob.operation === "create-recap-dub" ? "Writing and voicing the recap..." : "Extracting audio on the server..."}</span></>}
-                {renderJob.status === "completed" && <><Check size={15} /><span>{renderJob.operation === "burn-subtitles" ? "Subtitle render complete" : renderJob.operation === "split-video" ? "Video split complete" : renderJob.operation === "create-recap-dub" ? "AI recap and voiceover complete" : "Audio extraction complete"}</span></>}
+                {renderJob.status === "running" && <><LoaderCircle className="spin" size={15} /><span>{renderMessages[renderJob.operation].running}</span></>}
+                {renderJob.status === "completed" && <><Check size={15} /><span>{renderMessages[renderJob.operation].completed}</span></>}
                 {renderJob.status === "failed" && <><X size={15} /><span>{renderJob.error ?? "Render job failed."}</span></>}
               </div>
-              {renderJob.output_url && <a className="download-link" href={new URL(renderJob.output_url, API_BASE_URL).toString()} download><Download size={14} /> Download {renderJob.operation === "burn-subtitles" || renderJob.operation === "create-recap-dub" ? "MP4" : renderJob.operation === "split-video" ? "ZIP" : "MP3"}</a>}
-              {renderJob.result_text && <label className="recap-result"><span>AI recap script</span><textarea value={renderJob.result_text} readOnly rows={5} aria-label="AI recap script" /></label>}
+              {renderJob.output_url && <a className="download-link" href={new URL(renderJob.output_url, API_BASE_URL).toString()} download><Download size={14} /> Download {renderMessages[renderJob.operation].extension}</a>}
+              {renderJob.result_text && <label className="recap-result"><span>Generated Burmese voice text</span><textarea value={renderJob.result_text} readOnly rows={5} aria-label="Generated Burmese voice text" /></label>}
             </div>
           )}
 
@@ -384,7 +561,9 @@ export default function Home() {
                   <button className="button button-secondary" type="button" onClick={() => startRenderJob("extract-audio")} disabled={renderBusy}><AudioLines size={15} /> Extract audio</button>
                   <button className="button button-secondary" type="button" onClick={() => startRenderJob("split-video")} disabled={renderBusy}><Scissors size={15} /> Split video</button>
                   <button className="button button-primary" type="button" onClick={() => startRenderJob("burn-subtitles")} disabled={renderBusy || !subtitleSrt.trim()}><Subtitles size={15} /> Render subtitles</button>
-                  <button className="button button-primary" type="button" onClick={() => startRenderJob("create-recap-dub")} disabled={renderBusy}><Mic2 size={15} /> AI recap + dub</button>
+                  <button className="button button-primary" type="button" onClick={() => startRenderJob("create-recap-dub")} disabled={renderBusy}>
+                    <Mic2 size={15} /> {voiceoverMode === "recap" ? "Create recap voiceover" : "Translate and dub"}
+                  </button>
                 </div>
               </div>
             ) : (
@@ -410,7 +589,17 @@ export default function Home() {
               const Icon = mode.icon;
               const selected = selectedMode === mode.id;
               return (
-                <button className={`mode-option${selected ? " selected" : ""}`} key={mode.id} onClick={() => setSelectedMode(mode.id)} type="button" aria-pressed={selected}>
+                <button
+                  className={`mode-option${selected ? " selected" : ""}`}
+                  key={mode.id}
+                  onClick={() => {
+                    setSelectedMode(mode.id);
+                    if (mode.id === "dialogue") setVoiceoverMode("dubbing");
+                    if (mode.id === "recap") setVoiceoverMode("recap");
+                  }}
+                  type="button"
+                  aria-pressed={selected}
+                >
                   <span className="mode-icon"><Icon size={17} /></span>
                   <span className="mode-copy"><strong>{mode.name}</strong><small>{mode.detail}</small></span>
                   <span className="mode-radio" />
@@ -475,20 +664,41 @@ export default function Home() {
             </div>
           </div>
           <div className="voiceover-editor">
-            <div className="voiceover-heading"><Mic2 size={16} /><strong>Movie recap + Burmese voiceover</strong></div>
+            <div className="voiceover-heading"><Mic2 size={16} /><strong>Burmese voice mode</strong></div>
+            <div className="voiceover-mode-options" role="group" aria-label="Choose voiceover mode">
+              <button
+                className={`voiceover-mode-option${voiceoverMode === "recap" ? " selected" : ""}`}
+                type="button"
+                onClick={() => setVoiceoverMode("recap")}
+                aria-pressed={voiceoverMode === "recap"}
+              >
+                <strong>Recap TTS</strong>
+                <small>Summarize the story in a new Burmese script.</small>
+              </button>
+              <button
+                className={`voiceover-mode-option${voiceoverMode === "dubbing" ? " selected" : ""}`}
+                type="button"
+                onClick={() => setVoiceoverMode("dubbing")}
+                aria-pressed={voiceoverMode === "dubbing"}
+              >
+                <strong>Thai → Myanmar dubbing</strong>
+                <small>Translate the original Thai dialogue directly into Burmese.</small>
+              </button>
+            </div>
             <div className="voiceover-fields">
-              <label className="style-field">
-                <span>Narration length</span>
-                <select value={recapSeconds} onChange={(event) => setRecapSeconds(Number(event.target.value))}>
-                  <option value={30}>About 30 sec</option>
-                  <option value={60}>About 1 min</option>
-                  <option value={120}>About 2 min</option>
-                  <option value={300}>About 5 min</option>
-                  <option value={420}>About 7 min</option>
-                  <option value={600}>About 10 min</option>
-                  <option value={900}>About 15 min</option>
-                </select>
-              </label>
+              {voiceoverMode === "recap" && (
+                <label className="style-field">
+                  <span>Recap length</span>
+                  <select value={recapSeconds} onChange={(event) => setRecapSeconds(Number(event.target.value))}>
+                    <option value={30}>About 30 sec</option>
+                    <option value={60}>About 1 min</option>
+                    <option value={120}>About 2 min</option>
+                    <option value={300}>About 5 min</option>
+                    <option value={420}>About 7 min</option>
+                    <option value={600}>About 10 min</option>
+                  </select>
+                </label>
+              )}
               <label className="style-field">
                 <span>Burmese voice</span>
                 <select value={voice} onChange={(event) => setVoice(event.target.value as typeof voice)}>
@@ -497,7 +707,11 @@ export default function Home() {
                 </select>
               </label>
             </div>
-            <p className="voiceover-note">Uses the SRT text above when provided; otherwise, transcribes Burmese speech from the source video.</p>
+            <p className="voiceover-note">
+              {voiceoverMode === "recap"
+                ? "Uses the source transcript to write a new Burmese recap script. Provide SRT above or transcribe Burmese speech from the video."
+                : "Provide Thai SRT above or transcribe Thai dialogue from the source audio. The dialogue is translated into Burmese before voice synthesis."}
+            </p>
             <label className="voiceover-toggle">
               <input type="checkbox" checked={includeOriginalAudio} onChange={(event) => setIncludeOriginalAudio(event.target.checked)} />
               <span>Keep original audio underneath</span>
@@ -511,6 +725,124 @@ export default function Home() {
           </div>
           <div className="setup-hint"><Sparkles size={15} /><span>Audio and subtitle renders run in a persistent local queue. Cloud storage and AI captioning are planned next.</span></div>
         </aside>
+      </section>
+
+      <section className="phase-one-section panel" id="phase1" aria-labelledby="phase-one-title">
+        <div className="phase-one-heading">
+          <AngelHalo size={46} />
+          <div>
+            <span className="section-kicker">PHASE 1 / ANGEL CONTROL EDITOR</span>
+            <h2 id="phase-one-title">Six tools for your video</h2>
+            <p>Template framing and animated text settings are applied to exported MP4s.</p>
+          </div>
+        </div>
+
+        <div className="phase-feature-grid">
+          <article className="phase-feature-card">
+            <span className="phase-feature-icon lilac"><Mic2 size={18} /></span>
+            <strong>1. Recap TTS or Thai dubbing</strong>
+            <small>{voiceoverMode === "recap" ? "Create a new Burmese recap script and voiceover." : "Transcribe Thai dialogue, translate it to Burmese, then synthesize the translation."}</small>
+            <button className="button button-secondary" type="button" onClick={() => void submitPhase1Action("audio-myanmar")} disabled={!uploadId || renderBusy}>
+              <Mic2 size={15} /> {voiceoverMode === "recap" ? "Create recap voiceover" : "Translate and dub"}
+            </button>
+          </article>
+
+          <article className="phase-feature-card">
+            <span className="phase-feature-icon mint"><Subtitles size={18} /></span>
+            <strong>2. Myanmar subtitles</strong>
+            <small>Render the SRT text and style configured in Project Setup.</small>
+            <button className="button button-secondary" type="button" onClick={() => void submitPhase1Action("subtitle")} disabled={!uploadId || renderBusy || !subtitleSrt.trim()}>
+              <Subtitles size={15} /> Render subtitles
+            </button>
+          </article>
+
+          <article className="phase-feature-card">
+            <span className="phase-feature-icon coral"><EyeOff size={18} /></span>
+            <strong>3. Hide original subtitles</strong>
+            <small>Blur, cover, or crop the lower part of the uploaded video.</small>
+            <select aria-label="Original subtitle hiding method" value={hideMethod} onChange={(event) => setHideMethod(event.target.value as typeof hideMethod)}>
+              <option value="blur">Blur lower area</option>
+              <option value="blackbox">Cover with black box</option>
+              <option value="crop">Crop lower area</option>
+            </select>
+            <button className="button button-secondary" type="button" onClick={() => void submitPhase1Action("hide-sub")} disabled={!uploadId || renderBusy}>
+              <EyeOff size={15} /> Hide subtitles
+            </button>
+          </article>
+
+          <article className="phase-feature-card">
+            <span className="phase-feature-icon mint"><LayoutTemplate size={18} /></span>
+            <strong>4. Template export</strong>
+            <small>Fit the video in a blurred background-fill frame and export at the selected aspect ratio.</small>
+            <select aria-label="Video preview aspect ratio" value={templateRatio} onChange={(event) => setTemplateRatio(event.target.value as TemplateRatio)}>
+              <option value="16:9">16:9 · YouTube</option>
+              <option value="9:16">9:16 · Reels / TikTok</option>
+              <option value="1:1">1:1 · Square</option>
+            </select>
+            <span className="phase-preview-note">Center-framed · automatic face detection is not enabled</span>
+            <button className="button button-secondary" type="button" onClick={() => void startRenderJob("export-video")} disabled={!uploadId || renderBusy}>
+              <Download size={15} /> Export video
+            </button>
+          </article>
+
+          <article className="phase-feature-card">
+            <span className="phase-feature-icon blue"><Type size={18} /></span>
+            <strong>5. Animated text export</strong>
+            <small>Overlay Myanmar, Thai, or English text on the exported video.</small>
+            <input
+              ref={textOverlayRef}
+              aria-label="Export text overlay"
+              maxLength={120}
+              onChange={(event) => setTextOverlay(event.target.value)}
+              placeholder="မြန်မာစာ / Thai / English"
+              value={textOverlay}
+            />
+            <select aria-label="Text animation" value={textAnimation} onChange={(event) => setTextAnimation(event.target.value as TextAnimation)}>
+              <option value="none">No animation</option>
+              <option value="fade">Fade in</option>
+              <option value="slide">Slide in</option>
+              <option value="pop">Pop in</option>
+            </select>
+            <select aria-label="Text position" value={textPosition} onChange={(event) => setTextPosition(event.target.value as typeof textPosition)}>
+              <option value="top">Top</option>
+              <option value="center">Center</option>
+              <option value="bottom">Bottom</option>
+            </select>
+            <label className="style-field">
+              <span>Text size <strong>{textSize}px</strong></span>
+              <input type="range" min={18} max={120} value={textSize} onChange={(event) => setTextSize(Number(event.target.value))} aria-label="Export text size" />
+            </label>
+            <select aria-label="Text color" value={textColor} onChange={(event) => setTextColor(event.target.value as typeof textColor)}>
+              <option value="white">White</option>
+              <option value="yellow">Yellow</option>
+              <option value="cyan">Cyan</option>
+            </select>
+            <span className="phase-preview-note">Configure VIDEO_FONT_PATH for Myanmar/Thai font rendering.</span>
+          </article>
+
+          <article className="phase-chat-card">
+            <div className="phase-chat-heading">
+              <span className="phase-feature-icon gold"><MessageCircle size={18} /></span>
+              <div><strong>6. Angel chat control</strong><small>Commands: Myanmar voice, subtitle, hide, template, or text.</small></div>
+            </div>
+            <div className="phase-chat-log" aria-live="polite">
+              {chatMessages.map((message, index) => (
+                <AngelChatBubble key={`${index}-${message.role}`} role={message.role} text={message.text} />
+              ))}
+            </div>
+            <form className="phase-chat-form" onSubmit={sendAngelMessage}>
+              <input
+                aria-label="Message Angel"
+                onChange={(event) => setChatInput(event.target.value)}
+                placeholder="Angel, Original Sub ဖျောက်..."
+                value={chatInput}
+              />
+              <button className="button button-primary" type="submit" aria-label="Send command" disabled={!chatInput.trim()}>
+                <Wand2 size={16} />
+              </button>
+            </form>
+          </article>
+        </div>
       </section>
 
       <section className="toolkit-section" id="toolkit">
