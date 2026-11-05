@@ -2,6 +2,7 @@ export type RenderOperation =
   | "extract-audio"
   | "burn-subtitles"
   | "split-video"
+  | "merge-clips"
   | "create-recap-dub"
   | "hide-sub"
   | "export-video"
@@ -16,7 +17,9 @@ export type RenderOperation =
   | "angel-chat"
   | "seo-metadata"
   | "export-pro"
-  | "export-pro-batch";
+  | "export-pro-batch"
+  | "story-script"
+  | "script-voiceover";
 
 export type RenderJob = {
   id: string;

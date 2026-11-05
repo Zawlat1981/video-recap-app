@@ -14,11 +14,14 @@ from zipfile import ZipFile
 
 import imageio_ffmpeg
 from PIL import Image
+from fastapi import HTTPException
 from starlette.datastructures import UploadFile
 
+from backend.ai_pro import generate_story_script
 from backend import job_store
 from backend import main
 from backend.ai_providers import (
+    ProviderError,
     generate_burmese_recap,
     synthesize_burmese_voice,
     translate_to_burmese,
@@ -28,6 +31,64 @@ from backend.voiceover import create_recap_dub, srt_to_plain_text
 
 
 class AIProviderTests(unittest.TestCase):
+    def test_story_script_uses_burmese_original_story_prompt(self) -> None:
+        response = Mock()
+        response.choices = [Mock()]
+        response.choices[0].message.content = "အခန်း ၁\nဇာတ်လမ်း"
+        with patch.dict(
+            os.environ,
+            {"OPENAI_API_KEY": "test-key", "OPENAI_CHAT_MODEL": "test-model"},
+        ), patch("backend.ai_providers.openai.OpenAI") as client_class:
+            client_class.return_value.chat.completions.create.return_value = response
+            result = generate_story_script("ရွာက မိန်းကလေးတစ်ဦး၏ အိပ်မက်", "drama", 5)
+
+        self.assertEqual(result, "အခန်း ၁\nဇာတ်လမ်း")
+        request = client_class.return_value.chat.completions.create.call_args.kwargs
+        self.assertIn("Myanmar Unicode", request["messages"][0]["content"])
+        self.assertIn("Number of chapters: 5", request["messages"][1]["content"])
+        self.assertEqual(request["max_tokens"], 2250)
+
+    def test_story_script_rejects_empty_idea(self) -> None:
+        with self.assertRaisesRegex(ProviderError, "Enter a story idea"):
+            generate_story_script("  ", "drama", 5)
+
+    def test_ollama_default_model_uses_versioned_installed_tag(self) -> None:
+        from backend.ai_providers import _chat_model
+
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "", "OLLAMA_MODEL": ""}):
+            self.assertEqual(_chat_model(), "qwen2.5:7b-instruct-q4_K_M")
+
+    def test_local_recap_uses_cpu_only_ollama_with_bounded_generation(self) -> None:
+        response = Mock(ok=True)
+        response.json.return_value = {"message": {"content": "မြန်မာ ဇာတ်လမ်းအကျဉ်း"}}
+        with patch.dict(
+            os.environ,
+            {
+                "OPENAI_API_KEY": "",
+                "OLLAMA_BASE_URL": "http://localhost:11434/v1",
+                "OLLAMA_MODEL": "qwen2.5:7b-instruct-q4_K_M",
+                "OLLAMA_NUM_GPU": "0",
+            },
+        ), patch("backend.ai_providers.requests.post", return_value=response) as request:
+            result = generate_burmese_recap("ဇာတ်လမ်းစာသား", 420)
+
+        self.assertEqual(result, "မြန်မာ ဇာတ်လမ်းအကျဉ်း")
+        self.assertEqual(request.call_args.args[0], "http://localhost:11434/api/chat")
+        self.assertEqual(request.call_args.kwargs["timeout"], (15, 1800))
+        options = request.call_args.kwargs["json"]["options"]
+        self.assertEqual(options["num_gpu"], 0)
+        self.assertEqual(options["num_ctx"], 4096)
+        self.assertEqual(options["num_predict"], 1260)
+
+    def test_local_recap_reports_ollama_runner_disconnect_actionably(self) -> None:
+        response = Mock(ok=False, status_code=500, text="")
+        response.json.return_value = {"error": "wsarecv: device lost"}
+        with patch.dict(os.environ, {"OPENAI_API_KEY": ""}), patch(
+            "backend.ai_providers.requests.post", return_value=response
+        ):
+            with self.assertRaisesRegex(ProviderError, "CPU-only inference"):
+                generate_burmese_recap("ဇာတ်လမ်းစာသား", 60)
+
     def test_openai_recap_uses_configured_model_and_returns_script(self) -> None:
         response = Mock()
         response.choices = [Mock()]
@@ -43,6 +104,13 @@ class AIProviderTests(unittest.TestCase):
         request = client_class.return_value.chat.completions.create.call_args.kwargs
         self.assertEqual(request["model"], "test-model")
         self.assertIn("60 စက္ကန့်စာ", request["messages"][1]["content"])
+        self.assertEqual(request["max_tokens"], 256)
+        client_class.assert_called_once_with(
+            base_url="https://api.openai.com/v1",
+            api_key="test-key",
+            timeout=1800,
+            max_retries=0,
+        )
 
     def test_azure_transcription_sets_burmese_locale(self) -> None:
         response = Mock(ok=True)
@@ -106,6 +174,112 @@ class AIProviderTests(unittest.TestCase):
 
 
 class VoiceoverMuxTests(unittest.TestCase):
+    def test_script_voiceover_speaks_supplied_text_and_extends_short_video(self) -> None:
+        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        job_id = uuid.uuid4().hex
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "short-video.mp4"
+            voice = root / "long-voice.mp3"
+            subprocess.run(
+                [ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=teal:s=320x180:d=1:r=12", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", str(source)],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                [ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "sine=frequency=880:duration=2.5", "-codec:a", "libmp3lame", str(voice)],
+                check=True,
+                capture_output=True,
+            )
+
+            with patch("backend.voiceover.synthesize_burmese_voice", return_value=voice.read_bytes()) as synthesize, patch(
+                "backend.voiceover.generate_burmese_recap", side_effect=AssertionError("must not rewrite the script")
+            ), patch("backend.voiceover.translate_to_burmese", side_effect=AssertionError("must not translate the script")):
+                output, script = create_recap_dub(
+                    job_id,
+                    source,
+                    subtitle_srt="1\n00:00:00,000 --> 00:00:02,000\nမြန်မာစာတန်း\n",
+                    voice="my-MM-NilarNeural",
+                    recap_seconds=60,
+                    include_original_audio=False,
+                    background_volume=0,
+                    script_text="  ကိုယ်ရေးထားတဲ့ မြန်မာစာကို အတိုင်းဖတ်ပါ။  ",
+                )
+
+            probe = subprocess.run(
+                [ffmpeg, "-hide_banner", "-i", str(output)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            duration = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", probe.stderr)
+            self.assertEqual(script, "ကိုယ်ရေးထားတဲ့ မြန်မာစာကို အတိုင်းဖတ်ပါ။")
+            self.assertEqual(synthesize.call_args.args[0], script)
+            self.assertIsNotNone(duration)
+            hours, minutes, seconds = duration.groups()
+            self.assertGreaterEqual(int(hours) * 3600 + int(minutes) * 60 + float(seconds), 2.4)
+            self.assertIn("Audio: aac", probe.stderr)
+            output.unlink()
+
+        (Path(__file__).resolve().parent / "storage" / "working" / f"{job_id}.voice.mp3").unlink(missing_ok=True)
+
+    def test_recap_transcribes_in_the_selected_source_language(self) -> None:
+        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_path = root / "source.mp4"
+            voice_path = root / "voice.mp3"
+            transcription_audio = root / "transcription.mp3"
+            subprocess.run(
+                [
+                    ffmpeg, "-hide_banner", "-loglevel", "error",
+                    "-f", "lavfi", "-i", "sine=frequency=880:duration=1",
+                    "-codec:a", "libmp3lame", str(voice_path),
+                ],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                [
+                    ffmpeg, "-hide_banner", "-loglevel", "error",
+                    "-f", "lavfi", "-i", "color=c=teal:s=320x180:d=1:r=12",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", str(source_path),
+                ],
+                check=True,
+                capture_output=True,
+            )
+
+            job_ids: list[str] = []
+            with patch("backend.voiceover._extract_transcription_audio", return_value=transcription_audio), patch(
+                "backend.voiceover.transcribe_audio", return_value="source transcript"
+            ) as transcribe, patch(
+                "backend.voiceover.generate_burmese_recap", return_value="မြန်မာ ဇာတ်လမ်းအကျဉ်း"
+            ), patch(
+                "backend.voiceover.synthesize_burmese_voice", return_value=voice_path.read_bytes()
+            ):
+                for source_language in ("th", "my"):
+                    job_id = uuid.uuid4().hex
+                    job_ids.append(job_id)
+                    output_path, _ = create_recap_dub(
+                        job_id,
+                        source_path,
+                        subtitle_srt=None,
+                        voice="my-MM-NilarNeural",
+                        recap_seconds=30,
+                        include_original_audio=False,
+                        background_volume=0,
+                        source_language=source_language,
+                    )
+                    self.assertTrue(output_path.is_file())
+                    output_path.unlink()
+
+            self.assertEqual(
+                [call.kwargs["language"] for call in transcribe.call_args_list],
+                ["th", "my"],
+            )
+            for job_id in job_ids:
+                (Path(__file__).resolve().parent / "storage" / "working" / f"{job_id}.voice.mp3").unlink(missing_ok=True)
+
     def test_voiceover_muxes_over_original_audio_and_silent_video(self) -> None:
         ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
         job_ids: list[str] = []
@@ -389,6 +563,207 @@ class VideoDesignExportTests(unittest.TestCase):
 
 
 class Phase2PipelineTests(unittest.TestCase):
+    def test_story_script_job_does_not_require_a_video_upload(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            original_database = job_store.DATABASE_PATH
+            job_store.DATABASE_PATH = Path(directory) / "jobs.sqlite3"
+            try:
+                job_store.initialize_job_store()
+                result = asyncio.run(
+                    main.create_render_job(
+                        main.CreateRenderJobRequest(
+                            upload_id="0" * 32,
+                            operation="story-script",
+                            ai_prompt="ရွာလေးတစ်ရွာရဲ့ လျှို့ဝှက်ချက်",
+                            story_genre="mystery",
+                            story_chapters=5,
+                        )
+                    )
+                )
+                saved_job = job_store.get_job(str(result["id"]))
+                self.assertIsNotNone(saved_job)
+                self.assertEqual(saved_job["operation"], "story-script")
+                self.assertEqual(saved_job["parameters"]["story_chapters"], 5)
+
+                with self.assertRaises(HTTPException) as error:
+                    asyncio.run(
+                        main.create_render_job(
+                            main.CreateRenderJobRequest(
+                                upload_id="0" * 32,
+                                operation="story-script",
+                            )
+                        )
+                    )
+                self.assertEqual(error.exception.status_code, 422)
+            finally:
+                job_store.DATABASE_PATH = original_database
+
+    def test_script_voiceover_job_requires_script_and_timed_subtitles(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            original_database = job_store.DATABASE_PATH
+            job_store.DATABASE_PATH = Path(directory) / "jobs.sqlite3"
+            try:
+                job_store.initialize_job_store()
+                upload_id = uuid.uuid4().hex
+                with patch.object(main, "find_uploaded_video", return_value=Path("source.mp4")):
+                    result = asyncio.run(
+                        main.create_render_job(
+                            main.CreateRenderJobRequest(
+                                upload_id=upload_id,
+                                operation="script-voiceover",
+                                script_text="ကိုယ်တိုင်ရေးထားသော စာသား",
+                                subtitle_srt="1\n00:00:00,000 --> 00:00:02,000\nမြန်မာစာတန်း",
+                            )
+                        )
+                    )
+
+                    saved_job = job_store.get_job(str(result["id"]))
+                    self.assertIsNotNone(saved_job)
+                    self.assertEqual(saved_job["operation"], "script-voiceover")
+                    self.assertEqual(saved_job["parameters"]["script_text"], "ကိုယ်တိုင်ရေးထားသော စာသား")
+
+                    with self.assertRaises(HTTPException) as missing_script:
+                        asyncio.run(
+                            main.create_render_job(
+                                main.CreateRenderJobRequest(
+                                    upload_id=upload_id,
+                                    operation="script-voiceover",
+                                    subtitle_srt="1\n00:00:00,000 --> 00:00:02,000\nမြန်မာစာတန်း",
+                                )
+                            )
+                        )
+                    self.assertEqual(missing_script.exception.status_code, 422)
+
+                    with self.assertRaises(HTTPException) as missing_srt:
+                        asyncio.run(
+                            main.create_render_job(
+                                main.CreateRenderJobRequest(
+                                    upload_id=upload_id,
+                                    operation="script-voiceover",
+                                    script_text="စာသား",
+                                )
+                            )
+                        )
+                    self.assertEqual(missing_srt.exception.status_code, 422)
+            finally:
+                job_store.DATABASE_PATH = original_database
+
+    def test_completed_merge_can_be_promoted_to_editable_source_without_copying_through_browser(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            original_database = job_store.DATABASE_PATH
+            original_render_directory = main.RENDER_DIRECTORY
+            original_upload_directory = main.UPLOAD_DIRECTORY
+            job_store.DATABASE_PATH = root / "jobs.sqlite3"
+            main.RENDER_DIRECTORY = root / "renders"
+            main.UPLOAD_DIRECTORY = root / "uploads"
+            main.RENDER_DIRECTORY.mkdir()
+            main.UPLOAD_DIRECTORY.mkdir()
+            try:
+                job_store.initialize_job_store()
+                job_id = uuid.uuid4().hex
+                merged_path = main.RENDER_DIRECTORY / f"{job_id}-merged.mp4"
+                merged_path.write_bytes(b"merged video")
+                job_store.create_job(job_id, uuid.uuid4().hex, "merge-clips", {})
+                job_store.update_job(job_id, status="completed", output_url=f"/renders/{merged_path.name}")
+
+                result = asyncio.run(main.upload_merged_video_as_source(job_id))
+
+                self.assertEqual(result["media_url"], f"/media/{result['id']}.mp4")
+                self.assertEqual((main.UPLOAD_DIRECTORY / f"{result['id']}.mp4").read_bytes(), b"merged video")
+            finally:
+                job_store.DATABASE_PATH = original_database
+                main.RENDER_DIRECTORY = original_render_directory
+                main.UPLOAD_DIRECTORY = original_upload_directory
+
+    def test_merge_job_preserves_clip_order_and_requires_multiple_unique_uploads(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            original_database = job_store.DATABASE_PATH
+            job_store.DATABASE_PATH = Path(directory) / "jobs.sqlite3"
+            try:
+                job_store.initialize_job_store()
+                clip_ids = [uuid.uuid4().hex, uuid.uuid4().hex]
+                with patch.object(main, "find_uploaded_video", side_effect=[Path("first.mp4"), Path("second.mp4")]):
+                    result = asyncio.run(
+                        main.create_render_job(
+                            main.CreateRenderJobRequest(
+                                upload_id="0" * 32,
+                                operation="merge-clips",
+                                merge_clip_ids=clip_ids,
+                            )
+                        )
+                    )
+
+                saved_job = job_store.get_job(str(result["id"]))
+                self.assertIsNotNone(saved_job)
+                self.assertEqual(saved_job["operation"], "merge-clips")
+                self.assertEqual(saved_job["parameters"]["merge_clip_ids"], clip_ids)
+
+                with self.assertRaises(HTTPException) as error:
+                    asyncio.run(
+                        main.create_render_job(
+                            main.CreateRenderJobRequest(
+                                upload_id="0" * 32,
+                                operation="merge-clips",
+                                merge_clip_ids=[clip_ids[0], clip_ids[0]],
+                            )
+                        )
+                    )
+                self.assertEqual(error.exception.status_code, 422)
+            finally:
+                job_store.DATABASE_PATH = original_database
+
+    def test_merge_clips_normalizes_video_and_silences_missing_audio(self) -> None:
+        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            uploads = root / "uploads"
+            renders = root / "renders"
+            working = root / "working"
+            for path in (uploads, renders, working):
+                path.mkdir()
+            clips = [uploads / "first.mp4", uploads / "second.mp4"]
+            subprocess.run(
+                [
+                    ffmpeg, "-hide_banner", "-loglevel", "error",
+                    "-f", "lavfi", "-i", "color=c=red:s=320x180:d=1:r=12",
+                    "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+                    "-shortest", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", "-y", str(clips[0]),
+                ],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                [
+                    ffmpeg, "-hide_banner", "-loglevel", "error",
+                    "-f", "lavfi", "-i", "color=c=blue:s=180x320:d=1:r=15",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-y", str(clips[1]),
+                ],
+                check=True,
+                capture_output=True,
+            )
+
+            output = main.merge_clips(
+                uuid.uuid4().hex,
+                clips,
+                render_directory=renders,
+                work_directory=working,
+            )
+            probe = subprocess.run(
+                [ffmpeg, "-hide_banner", "-i", str(output)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertIn("Video: h264", probe.stderr)
+            self.assertIn("320x180", probe.stderr)
+            self.assertIn("Audio: aac", probe.stderr)
+            duration = re.search(r"Duration:\s*\d+:\d+:(\d+(?:\.\d+)?)", probe.stderr)
+            self.assertIsNotNone(duration)
+            self.assertGreaterEqual(float(duration.group(1)), 1.9)
+            output.unlink()
+
     def test_image_video_supports_pan_preset(self) -> None:
         ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
         with tempfile.TemporaryDirectory() as directory:
@@ -529,6 +904,134 @@ class JobStoreMigrationTests(unittest.TestCase):
 
 
 class RenderWorkerTests(unittest.TestCase):
+    def test_queued_script_voiceover_speaks_exact_text_then_burns_subtitles(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_path = root / "source.mp4"
+            voice_path = root / "voice.mp4"
+            designed_path = root / "designed.mp4"
+            final_path = root / "final.mp4"
+            source_path.write_bytes(b"source video")
+            voice_path.write_bytes(b"voice video")
+            designed_path.write_bytes(b"designed video")
+            original_database = job_store.DATABASE_PATH
+            job_store.DATABASE_PATH = root / "jobs.sqlite3"
+            try:
+                job_store.initialize_job_store()
+                job_id = uuid.uuid4().hex
+                script = "ကိုယ်တိုင်ရေးထားသော စာသား"
+                subtitles = "1\n00:00:00,000 --> 00:00:02,000\nမြန်မာစာတန်း"
+                job_store.create_job(
+                    job_id,
+                    uuid.uuid4().hex,
+                    "script-voiceover",
+                    {
+                        "script_text": script,
+                        "subtitle_srt": subtitles,
+                        "voice": "my-MM-NilarNeural",
+                        "include_original_audio": False,
+                        "background_volume": 0,
+                        "font_family": "Noto Sans Myanmar",
+                        "template_ratio": "9:16",
+                    },
+                )
+
+                async def run_worker() -> None:
+                    stop_event = asyncio.Event()
+                    worker = asyncio.create_task(main.render_worker(stop_event))
+                    try:
+                        for _ in range(100):
+                            job = job_store.get_job(job_id)
+                            if job and job["status"] in {"completed", "failed"}:
+                                return
+                            await asyncio.sleep(0.01)
+                        self.fail("The queued script voiceover did not reach a terminal state.")
+                    finally:
+                        stop_event.set()
+                        await worker
+
+                with patch.object(main, "find_uploaded_video", return_value=source_path), patch.object(
+                    main,
+                    "create_recap_dub",
+                    return_value=(voice_path, script),
+                ) as voiceover, patch.object(
+                    main,
+                    "apply_video_design",
+                    return_value=designed_path,
+                ) as design, patch.object(
+                    main,
+                    "burn_subtitles",
+                    return_value=final_path,
+                ) as burn:
+                    asyncio.run(run_worker())
+
+                saved_job = job_store.get_job(job_id)
+                self.assertIsNotNone(saved_job)
+                self.assertEqual(saved_job["status"], "completed")
+                self.assertEqual(saved_job["result_text"], script)
+                self.assertEqual(saved_job["output_url"], "/renders/final.mp4")
+                self.assertEqual(voiceover.call_args.kwargs["script_text"], script)
+                self.assertEqual(design.call_args.args[2]["template_ratio"], "9:16")
+                self.assertEqual(burn.call_args.args[1], designed_path)
+                self.assertEqual(burn.call_args.args[2]["subtitle_srt"], subtitles)
+            finally:
+                job_store.DATABASE_PATH = original_database
+
+    def test_queued_merge_clips_job_joins_uploaded_ids_in_order(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output_path = root / "merged.mp4"
+            output_path.write_bytes(b"merged video")
+            original_database = job_store.DATABASE_PATH
+            job_store.DATABASE_PATH = root / "jobs.sqlite3"
+            try:
+                job_store.initialize_job_store()
+                job_id = uuid.uuid4().hex
+                clip_ids = [uuid.uuid4().hex, uuid.uuid4().hex]
+                job_store.create_job(
+                    job_id,
+                    "0" * 32,
+                    "merge-clips",
+                    {"merge_clip_ids": clip_ids},
+                )
+
+                async def run_worker() -> None:
+                    stop_event = asyncio.Event()
+                    worker = asyncio.create_task(main.render_worker(stop_event))
+                    try:
+                        for _ in range(100):
+                            job = job_store.get_job(job_id)
+                            if job and job["status"] in {"completed", "failed"}:
+                                return
+                            await asyncio.sleep(0.01)
+                        self.fail("The queued merge job did not reach a terminal state.")
+                    finally:
+                        stop_event.set()
+                        await worker
+
+                with patch.object(
+                    main,
+                    "find_uploaded_video",
+                    side_effect=[Path("first.mp4"), Path("second.mp4")],
+                ) as find_video, patch.object(
+                    main,
+                    "merge_clips",
+                    return_value=output_path,
+                ) as merge:
+                    asyncio.run(run_worker())
+
+                saved_job = job_store.get_job(job_id)
+                self.assertIsNotNone(saved_job)
+                self.assertEqual(saved_job["status"], "completed")
+                self.assertEqual(saved_job["output_url"], "/renders/merged.mp4")
+                self.assertEqual(
+                    merge.call_args.args[1],
+                    [Path("first.mp4"), Path("second.mp4")],
+                )
+                self.assertEqual(find_video.call_count, 2)
+            finally:
+                job_store.DATABASE_PATH = original_database
+
     def test_queued_recap_dub_job_persists_script_and_video_result(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -551,6 +1054,7 @@ class RenderWorkerTests(unittest.TestCase):
                         "recap_seconds": 30,
                         "include_original_audio": True,
                         "background_volume": 20,
+                        "source_language": "en",
                     },
                 )
 
@@ -589,6 +1093,7 @@ class RenderWorkerTests(unittest.TestCase):
                 self.assertEqual(saved_job["output_url"], "/renders/recap.mp4")
                 self.assertEqual(recap_dub.call_args.kwargs["mode"], "recap")
                 self.assertEqual(recap_dub.call_args.kwargs["voice"], "my-MM-NilarNeural")
+                self.assertEqual(recap_dub.call_args.kwargs["source_language"], "en")
                 self.assertEqual(design.call_args.args[2].get("template_ratio", "16:9"), "16:9")
             finally:
                 job_store.DATABASE_PATH = original_database

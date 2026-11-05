@@ -1,6 +1,7 @@
 import asyncio
 import os
 import re
+import shutil
 import subprocess
 import uuid
 import unicodedata
@@ -30,6 +31,7 @@ from backend.ai_pro import (
     auto_cut_highlights,
     generate_recap_scenes,
     generate_seo_metadata,
+    generate_story_script,
     segments_to_srt,
     suggest_editor_changes,
     transcribe_segments,
@@ -134,6 +136,7 @@ class CreateRenderJobRequest(BaseModel):
         "extract-audio",
         "burn-subtitles",
         "split-video",
+        "merge-clips",
         "create-recap-dub",
         "transcribe-audio",
         "hide-sub",
@@ -150,8 +153,11 @@ class CreateRenderJobRequest(BaseModel):
         "seo-metadata",
         "export-pro",
         "export-pro-batch",
+        "story-script",
+        "script-voiceover",
     ]
     mode: Literal["recap", "dubbing"] = "recap"
+    source_language: Literal["th", "my", "en"] = "th"
     segment_seconds: Literal[30, 60, 120] = 60
     recap_seconds: int = Field(default=600, ge=30, le=600)
     voice: Literal["my-MM-NilarNeural", "my-MM-ThihaNeural"] = "my-MM-NilarNeural"
@@ -191,6 +197,7 @@ class CreateRenderJobRequest(BaseModel):
     image_duration: int = Field(default=5, ge=3, le=10)
     image_motion: Literal["zoom-in", "zoom-out", "pan-left", "pan-right", "zoom-pan"] = "zoom-in"
     batch_upload_ids: list[str] = Field(default_factory=list, max_length=10)
+    merge_clip_ids: list[str] = Field(default_factory=list, max_length=10)
     minimum_silence: float = Field(default=1, ge=1, le=10)
     silence_threshold_db: int = Field(default=-40, ge=-60, le=-20)
     ai_script_seconds: int = Field(default=60, ge=30, le=120)
@@ -198,6 +205,9 @@ class CreateRenderJobRequest(BaseModel):
     ai_prompt: str = Field(default="", max_length=2000)
     ai_context: str = Field(default="", max_length=4000)
     ai_script: str = Field(default="", max_length=12000)
+    script_text: str = Field(default="", max_length=12000)
+    story_genre: str = Field(default="drama", max_length=40)
+    story_chapters: int = Field(default=5, ge=3, le=12)
     target_seconds: int = Field(default=60, ge=15, le=60)
     export_preset: Literal[
         "youtube-1080",
@@ -313,6 +323,152 @@ def split_video(job_id: str, source_path: Path, segment_seconds: int) -> Path:
     finally:
         for segment in WORK_DIRECTORY.glob(f"{job_id}-part-*.mp4"):
             segment.unlink(missing_ok=True)
+
+
+def merge_clips(
+    job_id: str,
+    clip_paths: list[Path],
+    *,
+    render_directory: Path | None = None,
+    work_directory: Path | None = None,
+) -> Path:
+    if not 2 <= len(clip_paths) <= 10:
+        raise RuntimeError("Choose between two and ten video clips to merge.")
+
+    render_directory = render_directory or RENDER_DIRECTORY
+    work_directory = work_directory or WORK_DIRECTORY
+    render_directory.mkdir(parents=True, exist_ok=True)
+    work_directory.mkdir(parents=True, exist_ok=True)
+    output_path = render_directory / f"{job_id}-merged.mp4"
+    temporary_path = work_directory / f"{job_id}.partial.mp4"
+    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    clip_info: list[tuple[float, bool]] = []
+
+    try:
+        for index, clip_path in enumerate(clip_paths, start=1):
+            probe = subprocess.run(
+                [ffmpeg, "-hide_banner", "-i", str(clip_path)],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            video_line = next(
+                (line for line in probe.stderr.splitlines() if "Video:" in line),
+                None,
+            )
+            if video_line is None:
+                raise RuntimeError(f"Clip {index} has no readable video stream.")
+            if index == 1:
+                dimensions = re.search(r"\b(\d{2,5})x(\d{2,5})\b", video_line)
+                if dimensions is None:
+                    raise RuntimeError("Could not read the first clip's video dimensions.")
+                source_width, source_height = map(int, dimensions.groups())
+                scale = min(1, 1920 / source_width, 1920 / source_height)
+                output_width = max(2, int(source_width * scale) // 2 * 2)
+                output_height = max(2, int(source_height * scale) // 2 * 2)
+
+            duration_match = re.search(
+                r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)",
+                probe.stderr,
+            )
+            if duration_match is None:
+                raise RuntimeError(f"Could not read the duration of clip {index}.")
+            hours, minutes, seconds = duration_match.groups()
+            duration = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+            if duration <= 0:
+                raise RuntimeError(f"Clip {index} has an invalid duration.")
+            has_audio = any("Audio:" in line for line in probe.stderr.splitlines())
+            clip_info.append((duration, has_audio))
+
+        filter_parts: list[str] = []
+        video_audio_labels: list[str] = []
+        includes_audio = any(info[1] for info in clip_info)
+        for index, (duration, clip_has_audio) in enumerate(clip_info):
+            video_label = f"v{index}"
+            filter_parts.append(
+                f"[{index}:v:0]"
+                f"scale={output_width}:{output_height}:force_original_aspect_ratio=decrease,"
+                f"pad={output_width}:{output_height}:(ow-iw)/2:(oh-ih)/2:color=black,"
+                f"setsar=1,fps=30,format=yuv420p,setpts=PTS-STARTPTS[{video_label}]"
+            )
+            video_audio_labels.append(f"[{video_label}]")
+            if includes_audio:
+                audio_label = f"a{index}"
+                if clip_has_audio:
+                    filter_parts.append(
+                        f"[{index}:a:0]"
+                        f"aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,"
+                        f"apad=whole_dur={duration:.6f},atrim=duration={duration:.6f},"
+                        f"asetpts=PTS-STARTPTS[{audio_label}]"
+                    )
+                else:
+                    filter_parts.append(
+                        f"anullsrc=r=48000:cl=stereo,atrim=duration={duration:.6f},"
+                        f"asetpts=PTS-STARTPTS[{audio_label}]"
+                    )
+                video_audio_labels.append(f"[{audio_label}]")
+
+        audio_streams = 1 if includes_audio else 0
+        concat_inputs = "".join(video_audio_labels)
+        output_labels = "[outv][outa]" if includes_audio else "[outv]"
+        filter_parts.append(
+            f"{concat_inputs}concat=n={len(clip_paths)}:v=1:a={audio_streams}{output_labels}"
+        )
+        command = [
+            ffmpeg,
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+        ]
+        for clip_path in clip_paths:
+            command.extend(["-i", str(clip_path)])
+        command.extend(
+            [
+                "-filter_complex",
+                ";".join(filter_parts),
+                "-map",
+                "[outv]",
+            ]
+        )
+        if includes_audio:
+            command.extend(["-map", "[outa]", "-c:a", "aac", "-b:a", "160k"])
+        else:
+            command.append("-an")
+        command.extend(
+            [
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "23",
+                "-threads",
+                "2",
+                "-movflags",
+                "+faststart",
+                str(temporary_path),
+            ]
+        )
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=4 * 60 * 60,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip()[-1000:] or "FFmpeg could not merge the clips.")
+        if not temporary_path.is_file() or temporary_path.stat().st_size == 0:
+            raise RuntimeError("FFmpeg did not produce a merged video.")
+        temporary_path.replace(output_path)
+        return output_path
+    except Exception:
+        temporary_path.unlink(missing_ok=True)
+        output_path.unlink(missing_ok=True)
+        raise
 
 
 def burn_subtitles(job_id: str, source_path: Path, parameters: dict[str, str | int]) -> Path:
@@ -975,8 +1131,10 @@ async def render_worker(stop_event: asyncio.Event) -> None:
                 "image-to-video",
                 "batch-export",
                 "export-pro-batch",
+                "merge-clips",
                 "angel-chat",
                 "seo-metadata",
+                "story-script",
             } else find_uploaded_video(job["upload_id"])
             if operation == "image-to-video":
                 image_ids = parameters.get("image_asset_ids", [])
@@ -1012,6 +1170,16 @@ async def render_worker(stop_event: asyncio.Event) -> None:
                     batch_upload_ids,
                     parameters,
                     export_preset=parameters.get("export_preset", "tiktok"),
+                )
+            elif operation == "merge-clips":
+                merge_clip_ids = parameters.get("merge_clip_ids", [])
+                if not isinstance(merge_clip_ids, list):
+                    raise RuntimeError("Merge clips requires an ordered list of uploaded videos.")
+                clip_paths = [find_uploaded_video(str(upload_id)) for upload_id in merge_clip_ids]
+                output_path = await asyncio.to_thread(
+                    merge_clips,
+                    job["id"],
+                    clip_paths,
                 )
             elif operation == "ai-script":
                 transcript_segments = await asyncio.to_thread(
@@ -1052,6 +1220,13 @@ async def render_worker(stop_event: asyncio.Event) -> None:
                 result_text = await asyncio.to_thread(
                     generate_seo_metadata,
                     parameters.get("ai_script", ""),
+                )
+            elif operation == "story-script":
+                result_text = await asyncio.to_thread(
+                    generate_story_script,
+                    parameters.get("ai_prompt", ""),
+                    parameters.get("story_genre", "drama"),
+                    parameters.get("story_chapters", 5),
                 )
             elif operation == "export-pro":
                 design_parameters = dict(parameters)
@@ -1134,7 +1309,7 @@ async def render_worker(stop_event: asyncio.Event) -> None:
                     source_path,
                     job["parameters"].get("hide_method", "blur"),
                 )
-            elif operation in ("create-recap-dub", "transcribe-audio"):
+            elif operation in ("create-recap-dub", "transcribe-audio", "script-voiceover"):
                 output_path, result_text = await asyncio.to_thread(
                     create_recap_dub,
                     job_id=job["id"],
@@ -1145,6 +1320,8 @@ async def render_worker(stop_event: asyncio.Event) -> None:
                     include_original_audio=job["parameters"].get("include_original_audio", True),
                     background_volume=job["parameters"].get("background_volume", 20),
                     mode=parameters.get("mode", "recap"),
+                    source_language=parameters.get("source_language", "th"),
+                    script_text=parameters.get("script_text") if operation == "script-voiceover" else None,
                 )
             else:
                 raise RuntimeError("Unsupported render operation.")
@@ -1153,6 +1330,7 @@ async def render_worker(stop_event: asyncio.Event) -> None:
                 "hide-sub",
                 "create-recap-dub",
                 "transcribe-audio",
+                "script-voiceover",
                 "auto-cut-silence",
                 "image-to-video",
                 "auto-highlights",
@@ -1170,6 +1348,19 @@ async def render_worker(stop_event: asyncio.Event) -> None:
                     raise
                 if rendered_output_path != output_path:
                     rendered_output_path.unlink(missing_ok=True)
+                if operation == "script-voiceover" and parameters.get("subtitle_srt"):
+                    designed_output_path = output_path
+                    try:
+                        output_path = await asyncio.to_thread(
+                            burn_subtitles,
+                            job["id"],
+                            designed_output_path,
+                            parameters,
+                        )
+                    except Exception:
+                        designed_output_path.unlink(missing_ok=True)
+                        raise
+                    designed_output_path.unlink(missing_ok=True)
             update_job(
                 job["id"],
                 status="completed",
@@ -1347,15 +1538,30 @@ async def create_render_job(
             raise HTTPException(status_code=422, detail="Batch video selections must be unique.")
         for upload_id in request.batch_upload_ids:
             find_uploaded_video(upload_id)
-    elif request.operation in {"angel-chat", "seo-metadata"}:
+    elif request.operation == "merge-clips":
+        if not 2 <= len(request.merge_clip_ids) <= 10:
+            raise HTTPException(status_code=422, detail="Choose between two and ten clips to merge.")
+        if len(set(request.merge_clip_ids)) != len(request.merge_clip_ids):
+            raise HTTPException(status_code=422, detail="Merge clip selections must be unique.")
+        for upload_id in request.merge_clip_ids:
+            find_uploaded_video(upload_id)
+    elif request.operation in {"angel-chat", "seo-metadata", "story-script"}:
         if request.operation == "angel-chat" and not request.ai_prompt.strip():
             raise HTTPException(status_code=422, detail="Enter an Angel chat prompt.")
         if request.operation == "seo-metadata" and not request.ai_script.strip():
             raise HTTPException(status_code=422, detail="Enter a script before generating metadata.")
+        if request.operation == "story-script" and not request.ai_prompt.strip():
+            raise HTTPException(status_code=422, detail="Enter a story idea before generating a script.")
     else:
         if not request.upload_id or request.upload_id == "0" * 32:
             raise HTTPException(status_code=422, detail="Upload a video before starting this operation.")
         find_uploaded_video(request.upload_id)
+
+    if request.operation == "script-voiceover":
+        if not request.script_text.strip():
+            raise HTTPException(status_code=422, detail="Enter the Burmese narration script to speak.")
+        if not request.subtitle_srt or "-->" not in request.subtitle_srt:
+            raise HTTPException(status_code=422, detail="SRT subtitle text with timecodes is required.")
 
     if request.logo_asset_id:
         find_uploaded_asset(request.logo_asset_id, "image")
@@ -1380,6 +1586,37 @@ async def create_render_job(
         request.operation,
         parameters,
     ))
+
+
+@app.post("/api/uploads/from-merge/{job_id}", status_code=201)
+async def upload_merged_video_as_source(job_id: str) -> dict[str, str | int]:
+    job = get_job(job_id)
+    if job is None or job["operation"] != "merge-clips" or job["status"] != "completed":
+        raise HTTPException(status_code=404, detail="A completed merge job was not found.")
+    output_url = job.get("output_url")
+    if not isinstance(output_url, str) or not output_url.startswith("/renders/"):
+        raise HTTPException(status_code=404, detail="The merged video output is unavailable.")
+    output_path = RENDER_DIRECTORY / Path(output_url).name
+    if output_path.resolve().parent != RENDER_DIRECTORY.resolve() or output_path.suffix.lower() != ".mp4":
+        raise HTTPException(status_code=404, detail="The merged video output is invalid.")
+    if not output_path.is_file():
+        raise HTTPException(status_code=404, detail="The merged video output is unavailable.")
+    if output_path.stat().st_size > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="The merged video exceeds the 2 GB source limit.")
+
+    upload_id = uuid.uuid4().hex
+    destination_path = UPLOAD_DIRECTORY / f"{upload_id}.mp4"
+    try:
+        await asyncio.to_thread(shutil.copyfile, output_path, destination_path)
+    except OSError as error:
+        destination_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail="Could not prepare the merged video for editing.") from error
+    return {
+        "id": upload_id,
+        "filename": f"{upload_id}.mp4",
+        "size": destination_path.stat().st_size,
+        "media_url": f"/media/{destination_path.name}",
+    }
 
 
 @app.get("/api/jobs/{job_id}")

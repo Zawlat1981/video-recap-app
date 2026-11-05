@@ -237,6 +237,45 @@ def suggest_editor_changes(prompt: str, context: str = "") -> str:
     return content.strip()
 
 
+def generate_story_script(idea: str, genre: str, chapter_count: int) -> str:
+    if not idea.strip():
+        raise ProviderError("Enter a story idea before generating a script.")
+    if len(idea) > 2000 or len(genre) > 40 or not 3 <= chapter_count <= 12:
+        raise ProviderError("Story details are outside the supported limits.")
+    try:
+        response = _chat_client().chat.completions.create(
+            model=_chat_model(),
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a Myanmar-language screenwriter. Create an original fictional story, not a recap "
+                        "or adaptation of an existing copyrighted work. Write natural Burmese in Myanmar Unicode. "
+                        "Return the requested number of chapters. For each chapter include a short title, a concise "
+                        "narration/script, and a visual description that a creator could use to prepare a scene. "
+                        "Do not claim to generate images, audio, or video."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Genre: {genre.strip() or 'drama'}\n"
+                        f"Number of chapters: {chapter_count}\n"
+                        f"Story idea:\n{idea.strip()}"
+                    ),
+                },
+            ],
+            temperature=0.7,
+            max_tokens=min(450 * chapter_count, 4000),
+        )
+    except Exception as error:
+        raise ProviderError(f"Story script generation failed: {error}") from error
+    content = response.choices[0].message.content
+    if not content or not content.strip():
+        raise ProviderError("The AI provider returned an empty story script.")
+    return content.strip()
+
+
 def auto_cut_highlights(
     job_id: str,
     source_path: Path,

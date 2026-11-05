@@ -20,7 +20,9 @@ const aiLanguages = ["th", "my", "en"] as const;
 
 const features = [
   { id: "audio-myanmar", name: "Recap TTS and direct dubbing", execution: "backend" },
+  { id: "script-voiceover", name: "Speak supplied Burmese script and burn subtitles", execution: "backend" },
   { id: "subtitle", name: "Myanmar subtitle render", execution: "backend" },
+  { id: "merge-clips", name: "Join and normalize multiple video clips", execution: "backend" },
   { id: "hide-sub", name: "Hide original subtitles", execution: "backend" },
   { id: "template", name: "Aspect-ratio video export", execution: "backend" },
   { id: "text", name: "Animated text video export", execution: "backend" },
@@ -33,6 +35,7 @@ const features = [
   { id: "templates-pro", name: "24 creator templates with local custom presets", execution: "frontend" },
   { id: "ai-pro", name: "Whisper recap scripts, timed subtitles, highlights, and Angel", execution: "backend" },
   { id: "export-pro", name: "YouTube, TikTok, Instagram, Facebook, and 4K exports", execution: "backend" },
+  { id: "story-studio", name: "Original Burmese story scripts with editable chapter outlines", execution: "backend" },
 ] as const;
 
 function formText(formData: FormData, key: string, fallback = "") {
@@ -107,9 +110,10 @@ export async function POST(request: NextRequest) {
   const action = formText(formData, "action");
   const uploadId = formText(formData, "upload_id");
   const usesBatchUploads = action === "batch-export" || action === "export-pro-batch";
+  const usesMergeClips = action === "merge-clips";
   const usesImageAssets = action === "image-to-video";
-  const usesNoVideo = action === "angel-chat" || action === "seo-metadata";
-  if (!usesBatchUploads && !usesImageAssets && !usesNoVideo && !/^[a-f0-9]{32}$/.test(uploadId)) {
+  const usesNoVideo = action === "angel-chat" || action === "seo-metadata" || action === "story-script";
+  if (!usesBatchUploads && !usesMergeClips && !usesImageAssets && !usesNoVideo && !/^[a-f0-9]{32}$/.test(uploadId)) {
     return NextResponse.json({ detail: "Upload a video before starting this action." }, { status: 400 });
   }
 
@@ -174,6 +178,7 @@ export async function POST(request: NextRequest) {
   let payload: Record<string, unknown>;
   if (action === "audio-myanmar") {
     const mode = formText(formData, "mode", "recap");
+    const sourceLanguage = formText(formData, "source_language", "th");
     const voice = formText(formData, "voice", voices[0]);
     const recapSeconds = integerField(formData, "recap_seconds", 600);
     const backgroundVolume = integerField(formData, "background_volume", 20);
@@ -182,6 +187,9 @@ export async function POST(request: NextRequest) {
     }
     if (mode !== "recap" && mode !== "dubbing") {
       return NextResponse.json({ detail: "Choose Recap TTS or direct dubbing mode." }, { status: 422 });
+    }
+    if (!aiLanguages.includes(sourceLanguage as (typeof aiLanguages)[number])) {
+      return NextResponse.json({ detail: "Choose Thai, Myanmar, or English as the source speech language." }, { status: 422 });
     }
     if (![30, 60, 120, 300, 420, 600].includes(recapSeconds)) {
       return NextResponse.json({ detail: "Choose a supported recap length." }, { status: 422 });
@@ -193,11 +201,49 @@ export async function POST(request: NextRequest) {
       upload_id: uploadId,
       operation: "create-recap-dub",
       mode,
+      source_language: sourceLanguage,
       subtitle_srt: formText(formData, "subtitle_srt"),
       voice,
       recap_seconds: recapSeconds,
       include_original_audio: formText(formData, "include_original_audio", "true") === "true",
       background_volume: backgroundVolume,
+      ...designOptions,
+    };
+  } else if (action === "script-voiceover") {
+    const script = formText(formData, "script_text").trim();
+    const subtitleSrt = formText(formData, "subtitle_srt").trim();
+    const voice = formText(formData, "voice", voices[0]);
+    const fontFamily = formText(formData, "font_family", "Noto Sans Myanmar");
+    const fontSize = integerField(formData, "font_size", 32);
+    const fontColor = formText(formData, "font_color", "white");
+    const position = formText(formData, "position", "bottom");
+    const outline = integerField(formData, "outline", 2);
+    const backgroundVolume = integerField(formData, "background_volume", 0);
+    if (!script || script.length > 12000 || !subtitleSrt || subtitleSrt.length > 200000 || !subtitleSrt.includes("-->")) {
+      return NextResponse.json({ detail: "Enter the Burmese narration and timed SRT subtitles." }, { status: 422 });
+    }
+    if (!voices.includes(voice as (typeof voices)[number])
+      || !fonts.includes(fontFamily as (typeof fonts)[number])
+      || !colors.includes(fontColor as (typeof colors)[number])
+      || !positions.includes(position as (typeof positions)[number])
+      || !Number.isInteger(fontSize) || fontSize < 16 || fontSize > 80
+      || !Number.isInteger(outline) || outline < 0 || outline > 8
+      || !Number.isInteger(backgroundVolume) || backgroundVolume < 0 || backgroundVolume > 100) {
+      return NextResponse.json({ detail: "Voice or subtitle style settings are invalid." }, { status: 422 });
+    }
+    payload = {
+      upload_id: uploadId,
+      operation: action,
+      script_text: script,
+      subtitle_srt: subtitleSrt,
+      voice,
+      include_original_audio: booleanField(formData, "include_original_audio"),
+      background_volume: backgroundVolume,
+      font_family: fontFamily,
+      font_size: fontSize,
+      font_color: fontColor,
+      position,
+      outline,
       ...designOptions,
     };
   } else if (action === "subtitle") {
@@ -289,6 +335,18 @@ export async function POST(request: NextRequest) {
       batch_upload_ids: batchUploadIds,
       ...designOptions,
     };
+  } else if (action === "merge-clips") {
+    const mergeClipIds = jsonArray(formData, "merge_clip_ids", 10);
+    if (!mergeClipIds || mergeClipIds.length < 2
+      || mergeClipIds.some((id) => typeof id !== "string" || !/^[a-f0-9]{32}$/.test(id))
+      || new Set(mergeClipIds).size !== mergeClipIds.length) {
+      return NextResponse.json({ detail: "Select two to ten unique video clips in merge order." }, { status: 422 });
+    }
+    payload = {
+      upload_id: "0".repeat(32),
+      operation: action,
+      merge_clip_ids: mergeClipIds,
+    };
   } else if (action === "ai-script") {
     const duration = integerField(formData, "ai_script_seconds", 60);
     const language = formText(formData, "ai_language", "th");
@@ -322,6 +380,21 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ detail: "Enter a recap script up to 12,000 characters." }, { status: 422 });
     }
     payload = { upload_id: "0".repeat(32), operation: action, ai_script: script };
+  } else if (action === "story-script") {
+    const idea = formText(formData, "ai_prompt").trim();
+    const genre = formText(formData, "story_genre", "drama").trim();
+    const chapters = integerField(formData, "story_chapters", 5);
+    if (!idea || idea.length > 2000 || !genre || genre.length > 40
+      || !Number.isInteger(chapters) || chapters < 3 || chapters > 12) {
+      return NextResponse.json({ detail: "Enter a story idea, choose a genre, and select 3 to 12 chapters." }, { status: 422 });
+    }
+    payload = {
+      upload_id: "0".repeat(32),
+      operation: action,
+      ai_prompt: idea,
+      story_genre: genre,
+      story_chapters: chapters,
+    };
   } else if (action === "export-pro" || action === "export-pro-batch") {
     const preset = formText(formData, "export_preset", "tiktok");
     if (!exportPresets.includes(preset as (typeof exportPresets)[number])) {

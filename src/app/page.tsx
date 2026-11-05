@@ -4,6 +4,8 @@ import {
   ArrowUpRight,
   AudioLines,
   Check,
+  ChevronDown,
+  ChevronUp,
   Clapperboard,
   Cloud,
   CloudUpload,
@@ -12,6 +14,7 @@ import {
   Film,
   EyeOff,
   LayoutTemplate,
+  LayoutGrid,
   Languages,
   LoaderCircle,
   MessageCircle,
@@ -29,6 +32,8 @@ import {
 import { ChangeEvent, DragEvent, FormEvent, useEffect, useRef, useState } from "react";
 import { AngelChatBubble, AngelHalo } from "../components/AngelHalo";
 import { Phase2Studio } from "../components/Phase2Studio";
+import type { Phase2Tab } from "../components/Phase2Studio";
+import type { Phase3Tab } from "../components/Phase3Studio";
 import type { RenderJob } from "../lib/phase2";
 import type { CreatorTemplate } from "../lib/templates";
 
@@ -43,6 +48,7 @@ const modes = [
 
 const tools = [
   { name: "Video splitter", description: "Cut a video into timed clips", icon: Scissors, tone: "mint", ready: true },
+  { name: "Clip merger", description: "Join up to 10 clips into one MP4", icon: Clapperboard, tone: "blue", ready: true },
   { name: "Movie recap", description: "Draft a Burmese recap narration", icon: Mic2, tone: "lilac", ready: true },
   { name: "Auto captions", description: "Generate timed subtitles", icon: Subtitles, tone: "mint" },
   { name: "Subtitle translate", description: "Work with SRT and translations", icon: Languages, tone: "lilac" },
@@ -52,9 +58,10 @@ const tools = [
 
 type UploadState = "idle" | "uploading" | "uploaded" | "error";
 type VoiceoverMode = "recap" | "dubbing";
+type SourceLanguage = "th" | "my" | "en";
 type TextAnimation = "none" | "fade" | "slide" | "pop" | "typewriter";
 
-type Phase1Action = "audio-myanmar" | "subtitle" | "hide-sub";
+type Phase1Action = "audio-myanmar" | "subtitle" | "hide-sub" | "script-voiceover";
 type AngelMessage = { role: "angel" | "user"; text: string };
 type TemplateRatio = "16:9" | "9:16" | "1:1";
 
@@ -68,6 +75,7 @@ const renderMessages: Record<RenderJob["operation"], { running: string; complete
   "extract-audio": { running: "Extracting audio on the server...", completed: "Audio extraction complete", extension: "MP3" },
   "burn-subtitles": { running: "Rendering subtitles on the server...", completed: "Subtitle render complete", extension: "MP4" },
   "split-video": { running: "Splitting video on the server...", completed: "Video split complete", extension: "ZIP" },
+  "merge-clips": { running: "Joining clips into one video...", completed: "Clips joined successfully", extension: "MP4" },
   "create-recap-dub": { running: "Creating the Burmese voiceover...", completed: "Burmese voiceover complete", extension: "MP4" },
   "hide-sub": { running: "Hiding the original subtitles...", completed: "Original subtitles hidden", extension: "MP4" },
   "export-video": { running: "Exporting the video design...", completed: "Video design export complete", extension: "MP4" },
@@ -83,6 +91,8 @@ const renderMessages: Record<RenderJob["operation"], { running: string; complete
   "seo-metadata": { running: "Writing Burmese title and description...", completed: "YouTube metadata ready", extension: "JSON" },
   "export-pro": { running: "Applying the selected export profile...", completed: "Pro export complete", extension: "MP4" },
   "export-pro-batch": { running: "Rendering the pro batch queue...", completed: "Pro batch export complete", extension: "ZIP" },
+  "story-script": { running: "Angel is drafting your Burmese story...", completed: "Story script ready", extension: "TEXT" },
+  "script-voiceover": { running: "Speaking your Burmese script and rendering timed subtitles...", completed: "Narration and subtitle video complete", extension: "MP4" },
 };
 
 function formatBytes(bytes: number) {
@@ -92,8 +102,10 @@ function formatBytes(bytes: number) {
 
 export default function Home() {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const mergeFilesInputRef = useRef<HTMLInputElement>(null);
   const previewUrlRef = useRef<string | null>(null);
   const [file, setFile] = useState<File | null>(null);
+  const [sourceFilename, setSourceFilename] = useState("");
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [selectedMode, setSelectedMode] = useState<(typeof modes)[number]["id"]>("recap");
   const [dragging, setDragging] = useState(false);
@@ -104,14 +116,20 @@ export default function Home() {
   const [renderJob, setRenderJob] = useState<RenderJob | null>(null);
   const [startingJob, setStartingJob] = useState(false);
   const [subtitleSrt, setSubtitleSrt] = useState("");
+  const [narrationScript, setNarrationScript] = useState("");
   const [fontFamily, setFontFamily] = useState("Myanmar Text");
   const [fontSize, setFontSize] = useState(32);
   const [fontColor, setFontColor] = useState<"white" | "yellow" | "cyan">("white");
   const [subtitlePosition, setSubtitlePosition] = useState<"top" | "center" | "bottom">("bottom");
   const [outline, setOutline] = useState(2);
   const [segmentSeconds, setSegmentSeconds] = useState<30 | 60 | 120>(60);
+  const [mergeFiles, setMergeFiles] = useState<File[]>([]);
+  const [mergeUploading, setMergeUploading] = useState(false);
+  const [mergeProgress, setMergeProgress] = useState(0);
+  const [promotingMerge, setPromotingMerge] = useState(false);
   const [recapSeconds, setRecapSeconds] = useState<number>(600);
   const [voiceoverMode, setVoiceoverMode] = useState<VoiceoverMode>("recap");
+  const [sourceLanguage, setSourceLanguage] = useState<SourceLanguage>("th");
   const [voice, setVoice] = useState<"my-MM-NilarNeural" | "my-MM-ThihaNeural">("my-MM-NilarNeural");
   const [includeOriginalAudio, setIncludeOriginalAudio] = useState(true);
   const [backgroundVolume, setBackgroundVolume] = useState(20);
@@ -124,6 +142,8 @@ export default function Home() {
   const [textSize, setTextSize] = useState(48);
   const [textColor, setTextColor] = useState<"white" | "yellow" | "cyan">("white");
   const [appliedTemplate, setAppliedTemplate] = useState<CreatorTemplate | null>(null);
+  const [activePhase2Tab, setActivePhase2Tab] = useState<Phase2Tab>("elements");
+  const [activePhase3Tab, setActivePhase3Tab] = useState<Phase3Tab>("templates");
   const [chatInput, setChatInput] = useState("");
   const [chatMessages, setChatMessages] = useState<AngelMessage[]>([
     { role: "angel", text: "Mingalaba! Upload a video, then ask me to add subtitles, hide the original subtitles, or create a Burmese recap voiceover." },
@@ -131,7 +151,7 @@ export default function Home() {
   const textOverlayRef = useRef<HTMLInputElement>(null);
   const activeJobId = renderJob?.id;
   const activeJobStatus = renderJob?.status;
-  const renderBusy = startingJob || activeJobStatus === "queued" || activeJobStatus === "running";
+  const renderBusy = mergeUploading || promotingMerge || startingJob || activeJobStatus === "queued" || activeJobStatus === "running";
 
   useEffect(() => () => {
     if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
@@ -150,7 +170,12 @@ export default function Home() {
     void fetch(`${API_BASE_URL}/api/jobs/${savedJobId}`, { signal: controller.signal })
       .then(async (response) => {
         if (!response.ok) throw new Error("Saved render job is no longer available.");
-        setRenderJob(await response.json() as RenderJob);
+        const savedJob = await response.json() as RenderJob;
+        if (savedJob.status === "failed") {
+          window.localStorage.removeItem("recapkit-job-id");
+          return;
+        }
+        setRenderJob(savedJob);
       })
       .catch(() => {
         if (!controller.signal.aborted) window.localStorage.removeItem("recapkit-job-id");
@@ -208,6 +233,7 @@ export default function Home() {
     previewUrlRef.current = URL.createObjectURL(nextFile);
     setPreviewUrl(previewUrlRef.current);
     setFile(nextFile);
+    setSourceFilename(nextFile.name);
     setUploadState("idle");
     setProgress(0);
     setMediaUrl(null);
@@ -223,6 +249,7 @@ export default function Home() {
     previewUrlRef.current = null;
     setPreviewUrl(null);
     setFile(null);
+    setSourceFilename("");
     setUploadState("idle");
     setProgress(0);
     setMediaUrl(null);
@@ -236,6 +263,107 @@ export default function Home() {
   function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
     chooseFile(event.target.files?.[0]);
     event.target.value = "";
+  }
+
+  function chooseMergeFiles(selectedFiles: File[]) {
+    if (selectedFiles.length > 10) {
+      setError("တစ်ကြိမ်လျှင် video clip ၂ ခုမှ ၁၀ ခုအထိသာ ရွေးနိုင်ပါတယ်။");
+      return;
+    }
+    const invalidFile = selectedFiles.find((selectedFile) => {
+      const looksLikeVideo = selectedFile.type.startsWith("video/")
+        || /\.(mp4|mov|mkv|webm)$/i.test(selectedFile.name);
+      return !looksLikeVideo || selectedFile.size > MAX_FILE_SIZE;
+    });
+    if (invalidFile) {
+      setError(
+        invalidFile.size > MAX_FILE_SIZE
+          ? `${invalidFile.name}: ဖိုင်အရွယ်အစား 2 GB ထက်မကျော်ရပါ။`
+          : `${invalidFile.name}: MP4, MOV, MKV သို့မဟုတ် WEBM ဗီဒီယိုကိုသာ ရွေးပါ။`,
+      );
+      return;
+    }
+    setMergeFiles(selectedFiles);
+    setError(null);
+  }
+
+  function moveMergeFile(index: number, direction: -1 | 1) {
+    setMergeFiles((currentFiles) => {
+      const destination = index + direction;
+      if (destination < 0 || destination >= currentFiles.length) return currentFiles;
+      const reordered = [...currentFiles];
+      [reordered[index], reordered[destination]] = [reordered[destination], reordered[index]];
+      return reordered;
+    });
+  }
+
+  async function uploadAndMergeClips() {
+    if (mergeFiles.length < 2 || mergeUploading || renderBusy) return;
+
+    setMergeUploading(true);
+    setMergeProgress(0);
+    setError(null);
+    try {
+      const clipIds: string[] = [];
+      for (const [index, clip] of mergeFiles.entries()) {
+        const uploadData = new FormData();
+        uploadData.set("file", clip);
+        const uploadResponse = await fetch(`${API_BASE_URL}/api/uploads`, {
+          method: "POST",
+          body: uploadData,
+        });
+        const uploadResult = await uploadResponse.json() as { id?: string; detail?: string };
+        if (!uploadResponse.ok || !uploadResult.id) {
+          throw new Error(uploadResult.detail ?? `Could not upload ${clip.name}.`);
+        }
+        clipIds.push(uploadResult.id);
+        setMergeProgress(Math.round(((index + 1) / mergeFiles.length) * 100));
+      }
+
+      const jobData = new FormData();
+      jobData.set("action", "merge-clips");
+      jobData.set("merge_clip_ids", JSON.stringify(clipIds));
+      const jobResponse = await fetch("/api/video", { method: "POST", body: jobData });
+      const jobResult = await jobResponse.json() as RenderJob & { detail?: string };
+      if (!jobResponse.ok) throw new Error(jobResult.detail ?? "Could not start the merge job.");
+
+      setRenderJob(jobResult);
+      window.localStorage.setItem("recapkit-job-id", jobResult.id);
+    } catch (mergeError: unknown) {
+      setError(mergeError instanceof Error ? mergeError.message : "Could not merge the selected clips.");
+    } finally {
+      setMergeUploading(false);
+    }
+  }
+
+  async function promoteMergedVideoToSource() {
+    if (renderBusy || !renderJob || renderJob.operation !== "merge-clips" || renderJob.status !== "completed") return;
+    setPromotingMerge(true);
+    setError(null);
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/uploads/from-merge/${renderJob.id}`, { method: "POST" });
+      const result = await response.json() as { id?: string; filename?: string; media_url?: string; detail?: string };
+      if (!response.ok || !result.id || !result.media_url) {
+        throw new Error(result.detail ?? "Could not load the merged video as the current source.");
+      }
+      if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
+      previewUrlRef.current = null;
+      const sourceUrl = new URL(result.media_url, API_BASE_URL).toString();
+      setFile(null);
+      setSourceFilename(result.filename ?? "merged-video.mp4");
+      setPreviewUrl(sourceUrl);
+      setMediaUrl(sourceUrl);
+      setUploadId(result.id);
+      setUploadState("uploaded");
+      setProgress(100);
+      setRenderJob(null);
+      window.localStorage.setItem("recapkit-upload-id", result.id);
+      window.localStorage.removeItem("recapkit-job-id");
+    } catch (error: unknown) {
+      setError(error instanceof Error ? error.message : "Could not use the merged video as the current source.");
+    } finally {
+      setPromotingMerge(false);
+    }
   }
 
   function handleDrop(event: DragEvent<HTMLDivElement>) {
@@ -298,7 +426,7 @@ export default function Home() {
         : operation === "split-video"
           ? { upload_id: uploadId, operation, segment_seconds: segmentSeconds }
           : operation === "create-recap-dub"
-            ? { upload_id: uploadId, operation, mode: voiceoverMode, subtitle_srt: subtitleSrt || undefined, voice, recap_seconds: recapSeconds, include_original_audio: includeOriginalAudio, background_volume: backgroundVolume, template_ratio: templateRatio, text_overlay: textOverlay, text_animation: textAnimation, text_position: textPosition, text_size: textSize, text_color: textColor }
+            ? { upload_id: uploadId, operation, mode: voiceoverMode, source_language: sourceLanguage, subtitle_srt: subtitleSrt || undefined, voice, recap_seconds: recapSeconds, include_original_audio: includeOriginalAudio, background_volume: backgroundVolume, template_ratio: templateRatio, text_overlay: textOverlay, text_animation: textAnimation, text_position: textPosition, text_size: textSize, text_color: textColor }
             : operation === "hide-sub"
               ? { upload_id: uploadId, operation, hide_method: hideMethod, template_ratio: templateRatio, text_overlay: textOverlay, text_animation: textAnimation, text_position: textPosition, text_size: textSize, text_color: textColor }
               : operation === "export-video"
@@ -329,6 +457,10 @@ export default function Home() {
       setError("Add SRT subtitle text before starting the subtitle render.");
       return false;
     }
+    if (action === "script-voiceover" && (!narrationScript.trim() || !subtitleSrt.trim())) {
+      setError("Enter the Burmese narration script and timed SRT subtitles before rendering.");
+      return false;
+    }
 
     const formData = new FormData();
     formData.set("action", action);
@@ -337,7 +469,19 @@ export default function Home() {
       formData.set("subtitle_srt", subtitleSrt);
       formData.set("voice", voice);
       formData.set("mode", voiceoverMode);
+      formData.set("source_language", sourceLanguage);
       formData.set("recap_seconds", String(recapSeconds));
+      formData.set("include_original_audio", String(includeOriginalAudio));
+      formData.set("background_volume", String(backgroundVolume));
+    } else if (action === "script-voiceover") {
+      formData.set("script_text", narrationScript);
+      formData.set("subtitle_srt", subtitleSrt);
+      formData.set("voice", voice);
+      formData.set("font_family", fontFamily);
+      formData.set("font_size", String(fontSize));
+      formData.set("font_color", fontColor);
+      formData.set("position", subtitlePosition);
+      formData.set("outline", String(outline));
       formData.set("include_original_audio", String(includeOriginalAudio));
       formData.set("background_volume", String(backgroundVolume));
     } else if (action === "subtitle") {
@@ -447,6 +591,21 @@ export default function Home() {
     void handleAngelCommand(message);
   }
 
+  function navigateWorkspace(destination: "recap" | "merge" | "templates" | "elements" | "brand" | "audio" | "images" | "magic" | "ai" | "story" | "export") {
+    let sectionId = "studio";
+    if (destination === "merge") {
+      sectionId = "merge-clips-panel";
+    } else if (destination === "templates" || destination === "ai" || destination === "story" || destination === "export") {
+      setActivePhase3Tab(destination);
+      sectionId = "phase3";
+    } else if (destination === "elements" || destination === "brand" || destination === "audio" || destination === "images" || destination === "magic") {
+      setActivePhase2Tab(destination);
+      sectionId = "phase2";
+    }
+    document.querySelector(".workspace-menu")?.removeAttribute("open");
+    window.setTimeout(() => document.getElementById(sectionId)?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
+  }
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -458,8 +617,35 @@ export default function Home() {
           </span>
         </a>
         <nav className="top-nav" aria-label="Main navigation">
-          <a href="#studio">Cloud studio</a>
-          <a href="#toolkit">Tools</a>
+          <a href="#studio">Studio</a>
+          <details className="workspace-menu">
+            <summary><LayoutGrid size={15} /> Workspace menu <ChevronDown size={13} /></summary>
+            <div className="workspace-menu-popover">
+              <div className="workspace-menu-group">
+                <strong>Project</strong>
+                <button type="button" onClick={() => navigateWorkspace("recap")}>Recap &amp; dubbing</button>
+                <button type="button" onClick={() => navigateWorkspace("merge")}>Split &amp; merge clips</button>
+              </div>
+              <div className="workspace-menu-group">
+                <strong>Design</strong>
+                <button type="button" onClick={() => navigateWorkspace("templates")}>Templates</button>
+                <button type="button" onClick={() => navigateWorkspace("elements")}>Elements</button>
+                <button type="button" onClick={() => navigateWorkspace("brand")}>Brand Kit</button>
+                <button type="button" onClick={() => navigateWorkspace("audio")}>Music &amp; sound effects</button>
+                <button type="button" onClick={() => navigateWorkspace("images")}>Image to video</button>
+                <button type="button" onClick={() => navigateWorkspace("magic")}>Magic tools</button>
+              </div>
+              <div className="workspace-menu-group">
+                <strong>AI creation</strong>
+                <button type="button" onClick={() => navigateWorkspace("ai")}>AI recap tools</button>
+                <button type="button" onClick={() => navigateWorkspace("story")}>Story Studio</button>
+              </div>
+              <div className="workspace-menu-group">
+                <strong>Export</strong>
+                <button type="button" onClick={() => navigateWorkspace("export")}>Export profiles</button>
+              </div>
+            </div>
+          </details>
         </nav>
         <div className="top-actions">
           <span className="status-pill"><span className="status-dot" /> Local workspace</span>
@@ -511,7 +697,7 @@ export default function Home() {
                 </div>
                 <div className="selected-file">
                   <span className="selected-file-icon"><FileVideo size={18} /></span>
-                  <span className="selected-file-copy"><strong>{file?.name}</strong><small>{file ? formatBytes(file.size) : ""}</small></span>
+                  <span className="selected-file-copy"><strong>{sourceFilename}</strong><small>{file ? formatBytes(file.size) : ""}</small></span>
                   <button className="icon-button remove-file" type="button" onClick={clearFile} aria-label="Remove selected video">
                     <X size={17} />
                   </button>
@@ -548,7 +734,13 @@ export default function Home() {
                 {renderJob.status === "failed" && <><X size={15} /><span>{renderJob.error ?? "Render job failed."}</span></>}
               </div>
               {renderJob.output_url && <a className="download-link" href={new URL(renderJob.output_url, API_BASE_URL).toString()} download><Download size={14} /> Download {renderMessages[renderJob.operation].extension}</a>}
-              {renderJob.result_text && <label className="recap-result"><span>{renderJob.operation === "ai-script" ? "Generated recap scenes" : renderJob.operation === "subtitle-timing" ? "Timed subtitle cues" : renderJob.operation === "seo-metadata" ? "YouTube metadata" : renderJob.operation === "angel-chat" ? "Angel suggestions" : "Generated Burmese voice text"}</span><textarea value={renderJob.result_text} readOnly rows={5} aria-label="Generated result" /></label>}
+              {renderJob.operation === "merge-clips" && renderJob.status === "completed" && (
+                <button className="button button-secondary" type="button" onClick={() => void promoteMergedVideoToSource()} disabled={promotingMerge}>
+                  {promotingMerge ? <LoaderCircle className="spin" size={15} /> : <FileVideo size={15} />}
+                  {promotingMerge ? "Preparing merged video..." : "Continue with this merged video"}
+                </button>
+              )}
+              {renderJob.result_text && <label className="recap-result"><span>{renderJob.operation === "ai-script" ? "Generated recap scenes" : renderJob.operation === "story-script" ? "Generated story script" : renderJob.operation === "subtitle-timing" ? "Timed subtitle cues" : renderJob.operation === "seo-metadata" ? "YouTube metadata" : renderJob.operation === "angel-chat" ? "Angel suggestions" : "Generated Burmese voice text"}</span><textarea value={renderJob.result_text} readOnly rows={5} aria-label="Generated result" /></label>}
             </div>
           )}
 
@@ -582,6 +774,90 @@ export default function Home() {
               </button>
             )}
           </div>
+
+          <section className="merge-clips-panel" id="merge-clips-panel" aria-labelledby="merge-clips-heading">
+            <div className="merge-clips-heading">
+              <span className="section-kicker">JOIN VIDEO PARTS</span>
+              <h3 id="merge-clips-heading">Merge clips into one video</h3>
+              <p>Split ZIP ထဲက clip တွေကို အရင်ဖြည်ပြီး ရွေးပါ။ အစီအစဉ်ကို ↑↓ နဲ့ ပြင်နိုင်ပြီး output က ပထမ clip ရဲ့ အချိုးကို လိုက်နာပါတယ်။</p>
+            </div>
+            <input
+              ref={mergeFilesInputRef}
+              className="visually-hidden"
+              type="file"
+              accept="video/mp4,video/quicktime,video/x-matroska,video/webm,.mp4,.mov,.mkv,.webm"
+              multiple
+              onChange={(event) => {
+                chooseMergeFiles(Array.from(event.target.files ?? []));
+                event.target.value = "";
+              }}
+            />
+            <button
+              className="button button-secondary merge-select-button"
+              type="button"
+              onClick={() => mergeFilesInputRef.current?.click()}
+              disabled={mergeUploading || renderBusy}
+            >
+              <FileVideo size={15} /> Select 2–10 clips
+            </button>
+            {mergeFiles.length > 0 && (
+              <ol className="merge-clip-list">
+                {mergeFiles.map((clip, index) => (
+                  <li className="merge-clip-item" key={`${clip.name}-${clip.lastModified}-${index}`}>
+                    <span className="merge-clip-index">{index + 1}</span>
+                    <span className="merge-clip-name" title={clip.name}>
+                      <strong>{clip.name}</strong>
+                      <small>{formatBytes(clip.size)}</small>
+                    </span>
+                    <button
+                      className="icon-button"
+                      type="button"
+                      onClick={() => moveMergeFile(index, -1)}
+                      disabled={index === 0 || mergeUploading || renderBusy}
+                      aria-label={`Move ${clip.name} up`}
+                    >
+                      <ChevronUp size={16} />
+                    </button>
+                    <button
+                      className="icon-button"
+                      type="button"
+                      onClick={() => moveMergeFile(index, 1)}
+                      disabled={index === mergeFiles.length - 1 || mergeUploading || renderBusy}
+                      aria-label={`Move ${clip.name} down`}
+                    >
+                      <ChevronDown size={16} />
+                    </button>
+                    <button
+                      className="icon-button"
+                      type="button"
+                      onClick={() => setMergeFiles((currentFiles) => currentFiles.filter((_, fileIndex) => fileIndex !== index))}
+                      disabled={mergeUploading || renderBusy}
+                      aria-label={`Remove ${clip.name}`}
+                    >
+                      <X size={15} />
+                    </button>
+                  </li>
+                ))}
+              </ol>
+            )}
+            {mergeUploading && (
+              <div className="merge-progress" aria-live="polite">
+                <div className="progress-copy"><span>Uploading selected clips</span><strong>{mergeProgress}%</strong></div>
+                <div className="progress-track"><span style={{ width: `${mergeProgress}%` }} /></div>
+              </div>
+            )}
+            <button
+              className="button button-primary merge-submit-button"
+              type="button"
+              onClick={() => void uploadAndMergeClips()}
+              disabled={mergeFiles.length < 2 || mergeUploading || renderBusy}
+            >
+              {mergeUploading || (renderBusy && renderJob?.operation === "merge-clips")
+                ? <LoaderCircle className="spin" size={15} />
+                : <Clapperboard size={15} />}
+              {mergeUploading ? "Uploading clips..." : "Merge into one MP4"}
+            </button>
+          </section>
         </div>
 
         <aside className="settings-panel panel" id="studio">
@@ -617,8 +893,14 @@ export default function Home() {
           </div>
           <div className="setup-divider" />
           <div className="language-row">
-            <div className="language-label"><Languages size={16} /><span><strong>Caption language</strong><small>Transcript and subtitle language</small></span></div>
-            <select aria-label="Caption language" defaultValue="my">
+            <div className="language-label"><Languages size={16} /><span><strong>Source speech language</strong><small>Used for recap transcription; dubbing uses Thai</small></span></div>
+            <select
+              aria-label="Source speech language"
+              value={sourceLanguage}
+              onChange={(event) => setSourceLanguage(event.target.value as SourceLanguage)}
+              disabled={voiceoverMode === "dubbing"}
+            >
+              <option value="th">Thai</option>
               <option value="my">မြန်မာ</option>
               <option value="en">English</option>
             </select>
@@ -673,6 +955,17 @@ export default function Home() {
           </div>
           <div className="voiceover-editor">
             <div className="voiceover-heading"><Mic2 size={16} /><strong>Burmese voice mode</strong></div>
+            <label className="narration-script-field" htmlFor="narration-script">
+              <span>Your Burmese narration script</span>
+              <textarea
+                id="narration-script"
+                value={narrationScript}
+                maxLength={12000}
+                onChange={(event) => setNarrationScript(event.target.value)}
+                placeholder="Meta ကရေးပေးထားတဲ့ မြန်မာစကားပြော script ကို ဒီမှာ paste လုပ်ပါ။ Nilar က စာသားအတိုင်း ဖတ်ပါမယ်။"
+              />
+              <small>ဒီစာသားကို AI နဲ့ ပြန်မရေးဘဲ Nilar အသံနဲ့ တိုက်ရိုက်ဖတ်ပေးပါမယ်။ Subtitle အတွက် အောက်က SRT ကိုလည်း ဖြည့်ပါ။</small>
+            </label>
             <div className="voiceover-mode-options" role="group" aria-label="Choose voiceover mode">
               <button
                 className={`voiceover-mode-option${voiceoverMode === "recap" ? " selected" : ""}`}
@@ -752,6 +1045,15 @@ export default function Home() {
             <small>{voiceoverMode === "recap" ? "Create a new Burmese recap script and voiceover." : "Transcribe Thai dialogue, translate it to Burmese, then synthesize the translation."}</small>
             <button className="button button-secondary" type="button" onClick={() => void submitPhase1Action("audio-myanmar")} disabled={!uploadId || renderBusy}>
               <Mic2 size={15} /> {voiceoverMode === "recap" ? "Create recap voiceover" : "Translate and dub"}
+            </button>
+          </article>
+
+          <article className="phase-feature-card">
+            <span className="phase-feature-icon mint"><Mic2 size={18} /></span>
+            <strong>Script narration + subtitles</strong>
+            <small>Speak your supplied Burmese script as-is and burn the timed SRT onto the video in one render.</small>
+            <button className="button button-secondary" type="button" onClick={() => void submitPhase1Action("script-voiceover")} disabled={!uploadId || renderBusy || !narrationScript.trim() || !subtitleSrt.trim()}>
+              <Mic2 size={15} /> Create final narrated video
             </button>
           </article>
 
@@ -876,6 +1178,10 @@ export default function Home() {
         }}
         onApplyScript={setTextOverlay}
         onApplySubtitles={setSubtitleSrt}
+        activeTab={activePhase2Tab}
+        onActiveTabChange={setActivePhase2Tab}
+        activePhase3Tab={activePhase3Tab}
+        onPhase3TabChange={setActivePhase3Tab}
       />
 
       <section className="toolkit-section" id="toolkit">

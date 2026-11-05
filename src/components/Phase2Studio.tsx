@@ -7,6 +7,7 @@ import { ElementsPanel } from "./ElementsPanel";
 import { ImageToVideoPanel } from "./ImageToVideoPanel";
 import { MagicToolsPanel } from "./MagicToolsPanel";
 import { Phase3Studio } from "./Phase3Studio";
+import type { Phase3Tab } from "./Phase3Studio";
 import type { AssetInfo, ElementOverlay, RenderJob, RenderOperation } from "../lib/phase2";
 import type { CreatorTemplate } from "../lib/templates";
 
@@ -18,6 +19,8 @@ const tabs = [
   { id: "images", label: "Image to Video" },
   { id: "magic", label: "Magic Tools" },
 ] as const;
+
+export type Phase2Tab = (typeof tabs)[number]["id"];
 
 type Props = {
   uploadId: string | null;
@@ -35,13 +38,16 @@ type Props = {
   onTemplateApply: (template: CreatorTemplate) => void;
   onApplyScript: (text: string) => void;
   onApplySubtitles: (srt: string) => void;
+  activeTab: Phase2Tab;
+  onActiveTabChange: (tab: Phase2Tab) => void;
+  activePhase3Tab: Phase3Tab;
+  onPhase3TabChange: (tab: Phase3Tab) => void;
 };
 
 export function Phase2Studio({
   uploadId, renderBusy, templateRatio, textOverlay, textAnimation, textPosition, textSize, textColor, job, appliedTemplate, onJob, onError,
-  onTemplateApply, onApplyScript, onApplySubtitles,
+  onTemplateApply, onApplyScript, onApplySubtitles, activeTab, onActiveTabChange, activePhase3Tab, onPhase3TabChange,
 }: Props) {
-  const [activeTab, setActiveTab] = useState<(typeof tabs)[number]["id"]>("elements");
   const [elements, setElements] = useState<ElementOverlay[]>([]);
   const [primary, setPrimary] = useState("#FF6600");
   const [background, setBackground] = useState("#172A3A");
@@ -163,7 +169,7 @@ export function Phase2Studio({
     if (renderBusy) return;
     const needsBatch = action === "batch-export" || action === "export-pro-batch";
     const needsVideo = action !== "image-to-video" && !needsBatch
-      && action !== "angel-chat" && action !== "seo-metadata";
+      && action !== "angel-chat" && action !== "seo-metadata" && action !== "story-script";
     if (needsVideo && !uploadId) {
       onError("Upload a source video before starting this operation.");
       return;
@@ -220,7 +226,7 @@ export function Phase2Studio({
       </div>
       <div className="phase2-tabs" role="tablist" aria-label="Phase 2 creator tools">
         {tabs.map((tab) => (
-          <button type="button" role="tab" aria-selected={activeTab === tab.id} className={activeTab === tab.id ? "active" : ""} key={tab.id} onClick={() => setActiveTab(tab.id)}>
+          <button type="button" role="tab" aria-selected={activeTab === tab.id} className={activeTab === tab.id ? "active" : ""} key={tab.id} onClick={() => onActiveTabChange(tab.id)}>
             {tab.label}
           </button>
         ))}
@@ -315,6 +321,8 @@ export function Phase2Studio({
       onRun={(operation, values) => void submit(operation, values)}
       onApplyScript={onApplyScript}
       onApplySubtitles={onApplySubtitles}
+      activeTab={activePhase3Tab}
+      onActiveTabChange={onPhase3TabChange}
     />
     </>
   );
