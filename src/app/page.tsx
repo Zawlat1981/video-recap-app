@@ -138,6 +138,32 @@ function formatBytes(bytes: number) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function formatSrtTimestamp(milliseconds: number) {
+  const hours = Math.floor(milliseconds / 3_600_000);
+  const minutes = Math.floor((milliseconds % 3_600_000) / 60_000);
+  const seconds = Math.floor((milliseconds % 60_000) / 1_000);
+  const fraction = milliseconds % 1_000;
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")},${String(fraction).padStart(3, "0")}`;
+}
+
+function buildTimedSubtitleSrt(text: string, durationSeconds: number) {
+  const trimmedText = text.trim();
+  if (!trimmedText || trimmedText.includes("-->")) return trimmedText;
+
+  const lines = trimmedText.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (!lines.length) return "";
+
+  const durationMs = Number.isFinite(durationSeconds) && durationSeconds > 0
+    ? Math.max(1_000, Math.round(durationSeconds * 1_000))
+    : lines.length * 3_000;
+
+  return lines.map((line, index) => {
+    const startMs = Math.floor(index * durationMs / lines.length);
+    const endMs = Math.max(startMs + 1, Math.floor((index + 1) * durationMs / lines.length));
+    return `${index + 1}\n${formatSrtTimestamp(startMs)} --> ${formatSrtTimestamp(endMs)}\n${line}`;
+  }).join("\n\n");
+}
+
 export default function Home() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const mergeFilesInputRef = useRef<HTMLInputElement>(null);
@@ -478,17 +504,20 @@ export default function Home() {
   async function startRenderJob(operation: RenderJob["operation"]) {
     if (!uploadId || renderBusy) return;
 
+    const usesSubtitles = operation === "burn-subtitles" || operation === "create-recap-dub";
+    const timedSubtitleSrt = buildTimedSubtitleSrt(subtitleSrt, videoDuration);
+    if (usesSubtitles && subtitleSrt.trim() && !subtitleSrt.includes("-->")) setSubtitleSrt(timedSubtitleSrt);
     setStartingJob(true);
     setError(null);
     try {
       const payload = operation === "burn-subtitles"
-        ? { upload_id: uploadId, operation, subtitle_srt: subtitleSrt, font_family: fontFamily, font_size: fontSize, font_color: fontColor, position: subtitlePosition, outline, template_ratio: templateRatio, text_overlay: textOverlay, text_animation: textAnimation, text_position: textPosition, text_size: textSize, text_color: textColor }
+        ? { upload_id: uploadId, operation, subtitle_srt: timedSubtitleSrt, font_family: fontFamily, font_size: fontSize, font_color: fontColor, position: subtitlePosition, outline, template_ratio: templateRatio, text_overlay: textOverlay, text_animation: textAnimation, text_position: textPosition, text_size: textSize, text_color: textColor }
         : operation === "trim-video"
           ? { upload_id: uploadId, operation, trim_start_seconds: trimStartSeconds, trim_end_seconds: trimEndSeconds }
         : operation === "split-video"
           ? { upload_id: uploadId, operation, segment_seconds: segmentSeconds }
           : operation === "create-recap-dub"
-            ? { upload_id: uploadId, operation, mode: voiceoverMode, source_language: sourceLanguage, subtitle_srt: subtitleSrt || undefined, voice, recap_seconds: recapSeconds, include_original_audio: includeOriginalAudio, background_volume: backgroundVolume, template_ratio: templateRatio, text_overlay: textOverlay, text_animation: textAnimation, text_position: textPosition, text_size: textSize, text_color: textColor }
+            ? { upload_id: uploadId, operation, mode: voiceoverMode, source_language: sourceLanguage, subtitle_srt: timedSubtitleSrt || undefined, voice, recap_seconds: recapSeconds, include_original_audio: includeOriginalAudio, background_volume: backgroundVolume, template_ratio: templateRatio, text_overlay: textOverlay, text_animation: textAnimation, text_position: textPosition, text_size: textSize, text_color: textColor }
             : operation === "hide-sub"
               ? { upload_id: uploadId, operation, hide_method: hideMethod, template_ratio: templateRatio, text_overlay: textOverlay, text_animation: textAnimation, text_position: textPosition, text_size: textSize, text_color: textColor }
               : operation === "export-video"
@@ -522,15 +551,18 @@ export default function Home() {
       return false;
     }
     if (action === "script-voiceover" && (!narrationScript.trim() || !subtitleSrt.trim())) {
-      setError("Enter the Burmese narration script and timed SRT subtitles before rendering.");
+      setError("Enter the Burmese narration script and subtitle text before rendering.");
       return false;
     }
+
+    const timedSubtitleSrt = buildTimedSubtitleSrt(subtitleSrt, videoDuration);
+    if (action !== "hide-sub" && subtitleSrt.trim() && !subtitleSrt.includes("-->")) setSubtitleSrt(timedSubtitleSrt);
 
     const formData = new FormData();
     formData.set("action", action);
     formData.set("upload_id", uploadId);
     if (action === "audio-myanmar") {
-      formData.set("subtitle_srt", subtitleSrt);
+      formData.set("subtitle_srt", timedSubtitleSrt);
       formData.set("voice", voice);
       formData.set("mode", voiceoverMode);
       formData.set("source_language", sourceLanguage);
@@ -539,7 +571,7 @@ export default function Home() {
       formData.set("background_volume", String(backgroundVolume));
     } else if (action === "script-voiceover") {
       formData.set("script_text", narrationScript);
-      formData.set("subtitle_srt", subtitleSrt);
+      formData.set("subtitle_srt", timedSubtitleSrt);
       formData.set("voice", voice);
       formData.set("font_family", fontFamily);
       formData.set("font_size", String(fontSize));
@@ -549,7 +581,7 @@ export default function Home() {
       formData.set("include_original_audio", String(includeOriginalAudio));
       formData.set("background_volume", String(backgroundVolume));
     } else if (action === "subtitle") {
-      formData.set("subtitle_srt", subtitleSrt);
+      formData.set("subtitle_srt", timedSubtitleSrt);
       formData.set("font_family", fontFamily);
       formData.set("font_size", String(fontSize));
       formData.set("font_color", fontColor);
@@ -1068,17 +1100,17 @@ export default function Home() {
           <div className="subtitle-editor">
             <label className="subtitle-label" htmlFor="subtitle-srt">
               <span><Subtitles size={16} /><strong>Subtitle text</strong></span>
-              <small>SRT</small>
+              <small>Text / SRT</small>
             </label>
             <textarea
               id="subtitle-srt"
               className="subtitle-input"
               value={subtitleSrt}
               onChange={(event) => setSubtitleSrt(event.target.value)}
-              placeholder={"1\n00:00:00,000 --> 00:00:03,000\nမြန်မာစာတန်းကို ဒီမှာရေးပါ\n\n2\n00:00:03,000 --> 00:00:06,000\nနောက်စာတန်းတစ်ကြောင်း"}
+              placeholder={"မြန်မာစာတန်းကို ဒီမှာရေးပါ\nနောက်စာတန်းတစ်ကြောင်း"}
               spellCheck={false}
             />
-            <p className="subtitle-unicode-note">မြန်မာစာမှန်ကန်စေရန် Unicode ဖြင့်ရေးပါ။ Zawgyi စာသားကို အလိုအလျောက်ပြောင်းမပေးပါ။</p>
+            <p className="subtitle-unicode-note">စာကြောင်းတစ်ကြောင်းစီကို လိုင်းခွဲရေးပါ။ Render လုပ်ချိန်မှာ video ကြာချိန်အတွင်း အချိန်ကို အညီအမျှ အလိုအလျောက်ခွဲပေးပါမယ်။ ကိုယ်တိုင်အချိန်သတ်မှတ်ထားတဲ့ SRT ကိုလည်း ထည့်နိုင်ပါတယ်။ မြန်မာစာအတွက် Unicode သုံးပါ။</p>
             <div className="subtitle-style-grid">
               <label className="style-field">
                 <span>Font</span>
@@ -1123,7 +1155,7 @@ export default function Home() {
                 onChange={(event) => setNarrationScript(event.target.value)}
                 placeholder="Meta ကရေးပေးထားတဲ့ မြန်မာစကားပြော script ကို ဒီမှာ paste လုပ်ပါ။ Nilar က စာသားအတိုင်း ဖတ်ပါမယ်။"
               />
-              <small>ဒီစာသားကို AI နဲ့ ပြန်မရေးဘဲ Nilar အသံနဲ့ တိုက်ရိုက်ဖတ်ပေးပါမယ်။ Subtitle အတွက် အောက်က SRT ကိုလည်း ဖြည့်ပါ။</small>
+              <small>ဒီစာသားကို AI နဲ့ ပြန်မရေးဘဲ Nilar အသံနဲ့ တိုက်ရိုက်ဖတ်ပေးပါမယ်။ Subtitle အတွက် အောက်မှာ စာသားရေးပါ၊ အချိန်ကို အလိုအလျောက်ထည့်ပေးပါမယ်။</small>
             </label>
             <div className="voiceover-mode-options" role="group" aria-label="Choose voiceover mode">
               <button
@@ -1210,7 +1242,7 @@ export default function Home() {
           <article className="phase-feature-card">
             <span className="phase-feature-icon mint"><Mic2 size={18} /></span>
             <strong>Script narration + subtitles</strong>
-            <small>Speak your supplied Burmese script as-is and burn the timed SRT onto the video in one render.</small>
+            <small>Speak your supplied Burmese script as-is and burn subtitles onto the video in one render.</small>
             <button className="button button-secondary" type="button" onClick={() => void submitPhase1Action("script-voiceover")} disabled={!uploadId || renderBusy || !narrationScript.trim() || !subtitleSrt.trim()}>
               <Mic2 size={15} /> Create final narrated video
             </button>
@@ -1219,7 +1251,7 @@ export default function Home() {
           <article className="phase-feature-card">
             <span className="phase-feature-icon mint"><Subtitles size={18} /></span>
             <strong>2. Myanmar subtitles</strong>
-            <small>Render the SRT text and style configured in Project Setup.</small>
+            <small>Render the subtitle text and style configured in Project Setup.</small>
             <button className="button button-secondary" type="button" onClick={() => void submitPhase1Action("subtitle")} disabled={!uploadId || renderBusy || !subtitleSrt.trim()}>
               <Subtitles size={15} /> Render subtitles
             </button>
