@@ -10,8 +10,8 @@ import { Phase3Studio } from "./Phase3Studio";
 import type { Phase3Tab } from "./Phase3Studio";
 import type { AssetInfo, ElementOverlay, RenderJob, RenderOperation } from "../lib/phase2";
 import type { CreatorTemplate } from "../lib/templates";
+import { backendUrl } from "../lib/api";
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 const tabs = [
   { id: "elements", label: "Elements" },
   { id: "brand", label: "Brand Kit" },
@@ -105,7 +105,7 @@ export function Phase2Studio({
     const formData = new FormData();
     formData.set("file", file);
     formData.set("category", category);
-    const response = await fetch("/api/assets", { method: "POST", body: formData });
+    const response = await fetch(backendUrl("/api/assets"), { method: "POST", body: formData });
     const result = await response.json() as AssetInfo & { detail?: string };
     if (!response.ok) throw new Error(result.detail ?? `${category} upload failed.`);
     return result;
@@ -128,12 +128,20 @@ export function Phase2Studio({
     });
   }
 
-  async function uploadAudio(file: File, kind: "bgm" | "effect") {
+  async function uploadAudio(file: File, kind: "bgm" | "effect" | "voiceover") {
     await withUpload(async () => {
-      if (kind === "effect" && effects.length >= 10) throw new Error("Choose no more than ten sound effects.");
+      if (kind !== "bgm" && effects.length >= 10) throw new Error("Choose no more than ten voiceover and sound-effect tracks.");
+      if (kind === "voiceover" && effects.some((effect) => effect.kind === "voiceover")) {
+        throw new Error("Remove the current voiceover before adding another recording.");
+      }
       const asset = await uploadAsset(file, "audio");
       if (kind === "bgm") setBgm(asset);
-      else setEffects((current) => [...current, { asset, startSeconds: 0, volume: 0.8 }]);
+      else setEffects((current) => [...current, {
+        asset,
+        startSeconds: 0,
+        volume: kind === "voiceover" ? 1 : 0.8,
+        kind,
+      }]);
     });
   }
 
@@ -149,7 +157,7 @@ export function Phase2Studio({
       const uploads = await Promise.all(files.map(async (file) => {
         const formData = new FormData();
         formData.set("file", file);
-        const response = await fetch(`${API_BASE_URL}/api/uploads`, { method: "POST", body: formData });
+        const response = await fetch(backendUrl("/api/uploads"), { method: "POST", body: formData });
         const result = await response.json() as { id?: string; filename?: string; detail?: string };
         if (!response.ok || !result.id) throw new Error(result.detail ?? `Could not upload ${file.name}.`);
         return { id: result.id, filename: result.filename ?? file.name };
@@ -254,6 +262,7 @@ export function Phase2Studio({
           bgm={bgm} bgmVolume={bgmVolume} ducking={ducking} effects={effects}
           onBgmUpload={(file) => uploadAudio(file, "bgm")}
           onEffectUpload={(file) => uploadAudio(file, "effect")}
+          onVoiceoverUpload={(file) => uploadAudio(file, "voiceover")}
           onChange={(changes) => {
             if (changes.bgmVolume !== undefined) setBgmVolume(changes.bgmVolume);
             if (changes.ducking !== undefined) setDucking(changes.ducking);

@@ -96,6 +96,39 @@ class Phase3AIWorkflowTests(unittest.TestCase):
 
 
 class Phase3FFmpegTests(unittest.TestCase):
+    def test_trim_exports_only_the_selected_time_range(self) -> None:
+        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.mp4"
+            renders = root / "renders"
+            working = root / "working"
+            renders.mkdir()
+            working.mkdir()
+            subprocess.run(
+                [
+                    ffmpeg, "-hide_banner", "-loglevel", "error",
+                    "-f", "lavfi", "-i", "color=c=teal:s=160x90:d=2:r=12",
+                    "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+                    "-shortest", "-c:v", "libx264", "-preset", "ultrafast",
+                    "-pix_fmt", "yuv420p", "-c:a", "aac", "-y", str(source),
+                ],
+                check=True,
+                capture_output=True,
+            )
+            with patch.object(main, "RENDER_DIRECTORY", renders), patch.object(main, "WORK_DIRECTORY", working):
+                result = main.trim_video(uuid.uuid4().hex, source, 0.5, 1.5)
+            probe = subprocess.run(
+                [ffmpeg, "-hide_banner", "-i", str(result)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        self.assertIn("Video: h264", probe.stderr)
+        self.assertIn("Audio: aac", probe.stderr)
+        duration = probe.stderr.split("Duration: ")[1].split(",")[0]
+        self.assertAlmostEqual(float(duration.split(":")[-1]), 1, delta=0.15)
+
     def test_auto_highlights_exports_synchronized_audio_and_video(self) -> None:
         ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
         with tempfile.TemporaryDirectory() as directory:

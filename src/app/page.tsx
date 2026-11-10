@@ -3,6 +3,7 @@
 import {
   ArrowUpRight,
   AudioLines,
+  AudioWaveform,
   Check,
   ChevronDown,
   ChevronUp,
@@ -12,16 +13,17 @@ import {
   Download,
   FileVideo,
   Film,
+  FolderOpen,
   EyeOff,
+  Image,
   LayoutTemplate,
-  LayoutGrid,
   Languages,
   LoaderCircle,
   MessageCircle,
   Mic2,
   MessageSquareText,
   Scissors,
-  Settings2,
+  Settings,
   Sparkles,
   Subtitles,
   Type,
@@ -36,10 +38,9 @@ import type { Phase2Tab } from "../components/Phase2Studio";
 import type { Phase3Tab } from "../components/Phase3Studio";
 import type { RenderJob } from "../lib/phase2";
 import type { CreatorTemplate } from "../lib/templates";
+import { API_BASE_URL, backendUrl } from "../lib/api";
 
 const MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024;
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
-
 const modes = [
   { id: "recap", name: "Movie recap", detail: "Turn a full story into a short recap", icon: Film },
   { id: "dialogue", name: "Talking clip", detail: "Keep the conversation in focus", icon: MessageSquareText },
@@ -64,6 +65,42 @@ type TextAnimation = "none" | "fade" | "slide" | "pop" | "typewriter";
 type Phase1Action = "audio-myanmar" | "subtitle" | "hide-sub" | "script-voiceover";
 type AngelMessage = { role: "angel" | "user"; text: string };
 type TemplateRatio = "16:9" | "9:16" | "1:1";
+type WorkspaceDestination =
+  | "source" | "recap" | "captions" | "voice" | "trim" | "merge" | "audio"
+  | "elements" | "brand" | "images" | "magic" | "templates" | "ai" | "story" | "export";
+
+const workspaceGroups = [
+  {
+    title: "PROJECT",
+    items: [
+      { id: "source", label: "Media & preview", icon: FolderOpen },
+      { id: "trim", label: "Trim a clip", icon: Scissors },
+      { id: "merge", label: "Cut & join clips", icon: Scissors },
+    ],
+  },
+  {
+    title: "EDIT",
+    items: [
+      { id: "recap", label: "Recap & dubbing", icon: Film },
+      { id: "captions", label: "Myanmar subtitles", icon: Subtitles },
+      { id: "voice", label: "Voice & narration", icon: Mic2 },
+      { id: "audio", label: "Music & sound", icon: AudioWaveform },
+    ],
+  },
+  {
+    title: "DESIGN & EXPORT",
+    items: [
+      { id: "elements", label: "Elements", icon: Sparkles },
+      { id: "brand", label: "Brand kit", icon: Type },
+      { id: "templates", label: "Templates", icon: LayoutTemplate },
+      { id: "images", label: "Image to video", icon: Image },
+      { id: "magic", label: "Magic tools", icon: Wand2 },
+      { id: "ai", label: "AI tools", icon: Wand2 },
+      { id: "story", label: "Story studio", icon: MessageCircle },
+      { id: "export", label: "Export video", icon: Download },
+    ],
+  },
+] as const;
 
 const templateAspectRatios: Record<TemplateRatio, string> = {
   "16:9": "16 / 9",
@@ -73,6 +110,7 @@ const templateAspectRatios: Record<TemplateRatio, string> = {
 
 const renderMessages: Record<RenderJob["operation"], { running: string; completed: string; extension: string }> = {
   "extract-audio": { running: "Extracting audio on the server...", completed: "Audio extraction complete", extension: "MP3" },
+  "trim-video": { running: "Trimming the selected time range...", completed: "Video trim complete", extension: "MP4" },
   "burn-subtitles": { running: "Rendering subtitles on the server...", completed: "Subtitle render complete", extension: "MP4" },
   "split-video": { running: "Splitting video on the server...", completed: "Video split complete", extension: "ZIP" },
   "merge-clips": { running: "Joining clips into one video...", completed: "Clips joined successfully", extension: "MP4" },
@@ -115,9 +153,12 @@ export default function Home() {
   const [uploadId, setUploadId] = useState<string | null>(null);
   const [renderJob, setRenderJob] = useState<RenderJob | null>(null);
   const [startingJob, setStartingJob] = useState(false);
+  const [videoDuration, setVideoDuration] = useState(0);
+  const [trimStartSeconds, setTrimStartSeconds] = useState(0);
+  const [trimEndSeconds, setTrimEndSeconds] = useState(0);
   const [subtitleSrt, setSubtitleSrt] = useState("");
   const [narrationScript, setNarrationScript] = useState("");
-  const [fontFamily, setFontFamily] = useState("Myanmar Text");
+  const [fontFamily, setFontFamily] = useState("Noto Sans Myanmar");
   const [fontSize, setFontSize] = useState(32);
   const [fontColor, setFontColor] = useState<"white" | "yellow" | "cyan">("white");
   const [subtitlePosition, setSubtitlePosition] = useState<"top" | "center" | "bottom">("bottom");
@@ -144,6 +185,7 @@ export default function Home() {
   const [appliedTemplate, setAppliedTemplate] = useState<CreatorTemplate | null>(null);
   const [activePhase2Tab, setActivePhase2Tab] = useState<Phase2Tab>("elements");
   const [activePhase3Tab, setActivePhase3Tab] = useState<Phase3Tab>("templates");
+  const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceDestination>("source");
   const [chatInput, setChatInput] = useState("");
   const [chatMessages, setChatMessages] = useState<AngelMessage[]>([
     { role: "angel", text: "Mingalaba! Upload a video, then ask me to add subtitles, hide the original subtitles, or create a Burmese recap voiceover." },
@@ -165,9 +207,10 @@ export default function Home() {
       void Promise.resolve().then(() => setUploadId(savedUploadId));
     }
     if (!savedJobId) return;
+    if (!API_BASE_URL) return;
 
     const controller = new AbortController();
-    void fetch(`${API_BASE_URL}/api/jobs/${savedJobId}`, { signal: controller.signal })
+    void fetch(backendUrl(`/api/jobs/${savedJobId}`), { signal: controller.signal })
       .then(async (response) => {
         if (!response.ok) throw new Error("Saved render job is no longer available.");
         const savedJob = await response.json() as RenderJob;
@@ -192,7 +235,7 @@ export default function Home() {
 
     async function pollJob() {
       try {
-        const response = await fetch(`${API_BASE_URL}/api/jobs/${activeJobId}`, { signal: controller.signal });
+        const response = await fetch(backendUrl(`/api/jobs/${activeJobId}`), { signal: controller.signal });
         if (!response.ok) throw new Error("Job status could not be loaded.");
         const updatedJob = await response.json() as RenderJob;
         setRenderJob(updatedJob);
@@ -233,6 +276,9 @@ export default function Home() {
     previewUrlRef.current = URL.createObjectURL(nextFile);
     setPreviewUrl(previewUrlRef.current);
     setFile(nextFile);
+    setVideoDuration(0);
+    setTrimStartSeconds(0);
+    setTrimEndSeconds(0);
     setSourceFilename(nextFile.name);
     setUploadState("idle");
     setProgress(0);
@@ -249,6 +295,9 @@ export default function Home() {
     previewUrlRef.current = null;
     setPreviewUrl(null);
     setFile(null);
+    setVideoDuration(0);
+    setTrimStartSeconds(0);
+    setTrimEndSeconds(0);
     setSourceFilename("");
     setUploadState("idle");
     setProgress(0);
@@ -308,7 +357,7 @@ export default function Home() {
       for (const [index, clip] of mergeFiles.entries()) {
         const uploadData = new FormData();
         uploadData.set("file", clip);
-        const uploadResponse = await fetch(`${API_BASE_URL}/api/uploads`, {
+        const uploadResponse = await fetch(backendUrl("/api/uploads"), {
           method: "POST",
           body: uploadData,
         });
@@ -337,20 +386,20 @@ export default function Home() {
   }
 
   async function promoteMergedVideoToSource() {
-    if (renderBusy || !renderJob || renderJob.operation !== "merge-clips" || renderJob.status !== "completed") return;
+    if (renderBusy || !renderJob || !["merge-clips", "trim-video"].includes(renderJob.operation) || renderJob.status !== "completed") return;
     setPromotingMerge(true);
     setError(null);
     try {
-      const response = await fetch(`${API_BASE_URL}/api/uploads/from-merge/${renderJob.id}`, { method: "POST" });
+      const response = await fetch(backendUrl(`/api/uploads/from-render/${renderJob.id}`), { method: "POST" });
       const result = await response.json() as { id?: string; filename?: string; media_url?: string; detail?: string };
       if (!response.ok || !result.id || !result.media_url) {
-        throw new Error(result.detail ?? "Could not load the merged video as the current source.");
+        throw new Error(result.detail ?? "Could not load the rendered video as the current source.");
       }
       if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
       previewUrlRef.current = null;
-      const sourceUrl = new URL(result.media_url, API_BASE_URL).toString();
+      const sourceUrl = backendUrl(result.media_url);
       setFile(null);
-      setSourceFilename(result.filename ?? "merged-video.mp4");
+      setSourceFilename(result.filename ?? (renderJob.operation === "trim-video" ? "trimmed-video.mp4" : "merged-video.mp4"));
       setPreviewUrl(sourceUrl);
       setMediaUrl(sourceUrl);
       setUploadId(result.id);
@@ -382,14 +431,20 @@ export default function Home() {
     setError(null);
 
     const request = new XMLHttpRequest();
-    request.open("POST", `${API_BASE_URL}/api/uploads`);
+    try {
+      request.open("POST", backendUrl("/api/uploads"));
+    } catch (uploadError: unknown) {
+      setError(uploadError instanceof Error ? uploadError.message : "The video backend is not configured.");
+      setUploadState("error");
+      return;
+    }
     request.upload.onprogress = (event) => {
       if (event.lengthComputable) setProgress(Math.round((event.loaded / event.total) * 100));
     };
     request.onload = () => {
       if (request.status >= 200 && request.status < 300) {
         const result = JSON.parse(request.responseText) as { id: string; media_url?: string };
-        setMediaUrl(result.media_url ? new URL(result.media_url, API_BASE_URL).toString() : null);
+        setMediaUrl(result.media_url ? backendUrl(result.media_url) : null);
         setUploadId(result.id);
         window.localStorage.setItem("recapkit-upload-id", result.id);
         window.localStorage.removeItem("recapkit-job-id");
@@ -423,6 +478,8 @@ export default function Home() {
     try {
       const payload = operation === "burn-subtitles"
         ? { upload_id: uploadId, operation, subtitle_srt: subtitleSrt, font_family: fontFamily, font_size: fontSize, font_color: fontColor, position: subtitlePosition, outline, template_ratio: templateRatio, text_overlay: textOverlay, text_animation: textAnimation, text_position: textPosition, text_size: textSize, text_color: textColor }
+        : operation === "trim-video"
+          ? { upload_id: uploadId, operation, trim_start_seconds: trimStartSeconds, trim_end_seconds: trimEndSeconds }
         : operation === "split-video"
           ? { upload_id: uploadId, operation, segment_seconds: segmentSeconds }
           : operation === "create-recap-dub"
@@ -432,7 +489,7 @@ export default function Home() {
               : operation === "export-video"
                 ? { upload_id: uploadId, operation, template_ratio: templateRatio, text_overlay: textOverlay, text_animation: textAnimation, text_position: textPosition, text_size: textSize, text_color: textColor }
             : { upload_id: uploadId, operation };
-      const response = await fetch(`${API_BASE_URL}/api/jobs`, {
+      const response = await fetch(backendUrl("/api/jobs"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -591,9 +648,16 @@ export default function Home() {
     void handleAngelCommand(message);
   }
 
-  function navigateWorkspace(destination: "recap" | "merge" | "templates" | "elements" | "brand" | "audio" | "images" | "magic" | "ai" | "story" | "export") {
+  function navigateWorkspace(destination: WorkspaceDestination) {
+    setActiveWorkspace(destination);
     let sectionId = "studio";
-    if (destination === "merge") {
+    if (destination === "source") {
+      sectionId = "workspace-grid";
+    } else if (destination === "captions" || destination === "voice" || destination === "recap") {
+      sectionId = "studio";
+    } else if (destination === "trim") {
+      sectionId = "trim-editor";
+    } else if (destination === "merge") {
       sectionId = "merge-clips-panel";
     } else if (destination === "templates" || destination === "ai" || destination === "story" || destination === "export") {
       setActivePhase3Tab(destination);
@@ -602,7 +666,6 @@ export default function Home() {
       setActivePhase2Tab(destination);
       sectionId = "phase2";
     }
-    document.querySelector(".workspace-menu")?.removeAttribute("open");
     window.setTimeout(() => document.getElementById(sectionId)?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
   }
 
@@ -616,50 +679,47 @@ export default function Home() {
             <small>MYANMAR CREATOR STUDIO</small>
           </span>
         </a>
-        <nav className="top-nav" aria-label="Main navigation">
-          <a href="#studio">Studio</a>
-          <details className="workspace-menu">
-            <summary><LayoutGrid size={15} /> Workspace menu <ChevronDown size={13} /></summary>
-            <div className="workspace-menu-popover">
-              <div className="workspace-menu-group">
-                <strong>Project</strong>
-                <button type="button" onClick={() => navigateWorkspace("recap")}>Recap &amp; dubbing</button>
-                <button type="button" onClick={() => navigateWorkspace("merge")}>Split &amp; merge clips</button>
-              </div>
-              <div className="workspace-menu-group">
-                <strong>Design</strong>
-                <button type="button" onClick={() => navigateWorkspace("templates")}>Templates</button>
-                <button type="button" onClick={() => navigateWorkspace("elements")}>Elements</button>
-                <button type="button" onClick={() => navigateWorkspace("brand")}>Brand Kit</button>
-                <button type="button" onClick={() => navigateWorkspace("audio")}>Music &amp; sound effects</button>
-                <button type="button" onClick={() => navigateWorkspace("images")}>Image to video</button>
-                <button type="button" onClick={() => navigateWorkspace("magic")}>Magic tools</button>
-              </div>
-              <div className="workspace-menu-group">
-                <strong>AI creation</strong>
-                <button type="button" onClick={() => navigateWorkspace("ai")}>AI recap tools</button>
-                <button type="button" onClick={() => navigateWorkspace("story")}>Story Studio</button>
-              </div>
-              <div className="workspace-menu-group">
-                <strong>Export</strong>
-                <button type="button" onClick={() => navigateWorkspace("export")}>Export profiles</button>
-              </div>
-            </div>
-          </details>
-        </nav>
         <div className="top-actions">
-          <span className="status-pill"><span className="status-dot" /> Local workspace</span>
-          <button className="profile-button" type="button" aria-label="Workspace settings">
-            <Settings2 size={17} />
+          <span className="status-pill"><span className="status-dot" /> {API_BASE_URL ? "Backend URL configured" : "Backend not configured"}</span>
+          <button className="profile-button" type="button" aria-label="Open export workspace" onClick={() => navigateWorkspace("export")}>
+            <Settings size={17} />
           </button>
         </div>
       </header>
 
+      <div className="studio-layout">
+        <aside className="studio-sidebar" aria-label="Editing features">
+          <div className="sidebar-project">
+            <span className="sidebar-project-icon"><Clapperboard size={17} /></span>
+            <span><strong>My workspace</strong><small>VIDEO PROJECT</small></span>
+          </div>
+          {workspaceGroups.map((group) => (
+            <div className="workspace-nav-group" key={group.title}>
+              <span className="workspace-nav-heading">{group.title}</span>
+              {group.items.map(({ id, label, icon: Icon }) => (
+                <button
+                  className={`workspace-nav-item${activeWorkspace === id ? " active" : ""}`}
+                  type="button"
+                  key={id}
+                  onClick={() => navigateWorkspace(id)}
+                  aria-current={activeWorkspace === id ? "page" : undefined}
+                >
+                  <Icon size={17} /><span>{label}</span>
+                </button>
+              ))}
+            </div>
+          ))}
+          <div className={`backend-notice${API_BASE_URL ? " configured" : ""}`} role="status">
+            <span className="status-dot" />
+            <span>{API_BASE_URL ? "Video server URL configured" : "Set NEXT_PUBLIC_API_URL to enable rendering"}</span>
+          </div>
+        </aside>
+        <div className="studio-content">
       <section className="intro" id="home">
         <div>
-          <div className="eyebrow"><Sparkles size={13} /> VIDEO WORKSPACE <span> / </span> 01</div>
-          <h1>Make a story<br /><em>out of every video.</em></h1>
-          <p className="intro-copy">ဗီဒီယိုတင်ပြီး recap လုပ်ဖို့ အရင်ဆုံးစလိုက်ပါ။ နောက်အဆင့်တွေမှာ subtitle နဲ့ audio tools တွေကို တစ်ခုချင်းထည့်သွားမယ်။</p>
+          <div className="eyebrow"><Sparkles size={13} /> VIDEO WORKSPACE <span> / </span> EDITOR</div>
+          <h1>ဗီဒီယိုကို<br /><em>တစ်နေရာတည်းမှာ ပြင်ဆင်ပါ။</em></h1>
+          <p className="intro-copy">ဘယ်ဘက် Menu ကနေ လိုချင်တဲ့ tool ကိုရွေးပါ။ Clip ဖြတ်ဆက်၊ မြန်မာစာတန်းနဲ့ အသံထည့်ပြီး ဖုန်းမှာလည်း အဆင်ပြေစွာ export လုပ်နိုင်ပါတယ်။</p>
         </div>
         <div className="intro-note">
           <span className="note-icon"><Cloud size={17} /></span>
@@ -692,7 +752,19 @@ export default function Home() {
                   className="video-preview-frame"
                   style={{ aspectRatio: templateAspectRatios[templateRatio] }}
                 >
-                  <video className="video-preview" src={previewUrl} controls playsInline />
+                  <video
+                    className="video-preview"
+                    src={previewUrl}
+                    controls
+                    playsInline
+                    onLoadedMetadata={(event) => {
+                      const duration = event.currentTarget.duration;
+                      if (Number.isFinite(duration)) {
+                        setVideoDuration(duration);
+                        setTrimEndSeconds(duration);
+                      }
+                    }}
+                  />
                   {textOverlay.trim() && <span className="video-text-overlay">{textOverlay}</span>}
                 </div>
                 <div className="selected-file">
@@ -720,10 +792,53 @@ export default function Home() {
           {(file || error) && (
             <div className="upload-feedback" aria-live="polite">
               {uploadState === "uploading" && <><div className="progress-copy"><span>Uploading source video</span><strong>{progress}%</strong></div><div className="progress-track"><span style={{ width: `${progress}%` }} /></div></>}
-              {uploadState === "uploaded" && <div className="success-line"><Check size={16} /><span>Video uploaded to local storage</span>{mediaUrl && <a href={mediaUrl} target="_blank" rel="noreferrer">Open video <ArrowUpRight size={13} /></a>}</div>}
+              {uploadState === "uploaded" && <div className="success-line"><Check size={16} /><span>Video uploaded to the render server</span>{mediaUrl && <a href={mediaUrl} target="_blank" rel="noreferrer">Open video <ArrowUpRight size={13} /></a>}</div>}
               {error && <p className="error-line" role="alert">{error}</p>}
             </div>
           )}
+
+          <section className="trim-editor" id="trim-editor" aria-labelledby="trim-editor-heading">
+            <div className="trim-editor-heading">
+              <span className="section-kicker">QUICK EDIT</span>
+              <h3 id="trim-editor-heading">Trim this video</h3>
+              <p>စတင်ချိန်နဲ့ အဆုံးသတ်ချိန်ကို ရွေးပြီး လိုတဲ့အပိုင်းကို MP4 အဖြစ်ဖြတ်ထုတ်ပါ။</p>
+            </div>
+            <div className="trim-controls">
+              <label>
+                <span>Start (seconds)</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={videoDuration || 86400}
+                  step={0.1}
+                  value={trimStartSeconds}
+                  onChange={(event) => setTrimStartSeconds(Number(event.target.value))}
+                  disabled={!videoDuration}
+                />
+              </label>
+              <label>
+                <span>End (seconds){videoDuration ? ` · ${videoDuration.toFixed(1)}s total` : ""}</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={videoDuration || 86400}
+                  step={0.1}
+                  value={trimEndSeconds}
+                  onChange={(event) => setTrimEndSeconds(Number(event.target.value))}
+                  disabled={!videoDuration}
+                />
+              </label>
+              <button
+                className="button button-primary"
+                type="button"
+                onClick={() => void startRenderJob("trim-video")}
+                disabled={!uploadId || !videoDuration || trimStartSeconds < 0 || trimEndSeconds <= trimStartSeconds || trimEndSeconds > videoDuration || renderBusy}
+              >
+                <Scissors size={15} /> Export trimmed clip
+              </button>
+            </div>
+            {!uploadId && <small className="trim-hint">အရင်ဆုံး video ကိုရွေးပြီး Upload လုပ်ပါ။</small>}
+          </section>
 
           {renderJob && (
             <div className="render-feedback" aria-live="polite">
@@ -733,11 +848,11 @@ export default function Home() {
                 {renderJob.status === "completed" && <><Check size={15} /><span>{renderMessages[renderJob.operation].completed}</span></>}
                 {renderJob.status === "failed" && <><X size={15} /><span>{renderJob.error ?? "Render job failed."}</span></>}
               </div>
-              {renderJob.output_url && <a className="download-link" href={new URL(renderJob.output_url, API_BASE_URL).toString()} download><Download size={14} /> Download {renderMessages[renderJob.operation].extension}</a>}
-              {renderJob.operation === "merge-clips" && renderJob.status === "completed" && (
+              {renderJob.output_url && <a className="download-link" href={backendUrl(renderJob.output_url)} download><Download size={14} /> Download {renderMessages[renderJob.operation].extension}</a>}
+              {["merge-clips", "trim-video"].includes(renderJob.operation) && renderJob.status === "completed" && (
                 <button className="button button-secondary" type="button" onClick={() => void promoteMergedVideoToSource()} disabled={promotingMerge}>
                   {promotingMerge ? <LoaderCircle className="spin" size={15} /> : <FileVideo size={15} />}
-                  {promotingMerge ? "Preparing merged video..." : "Continue with this merged video"}
+                  {promotingMerge ? "Preparing video..." : `Continue with this ${renderJob.operation === "trim-video" ? "trimmed" : "merged"} video`}
                 </button>
               )}
               {renderJob.result_text && <label className="recap-result"><span>{renderJob.operation === "ai-script" ? "Generated recap scenes" : renderJob.operation === "story-script" ? "Generated story script" : renderJob.operation === "subtitle-timing" ? "Timed subtitle cues" : renderJob.operation === "seo-metadata" ? "YouTube metadata" : renderJob.operation === "angel-chat" ? "Angel suggestions" : "Generated Burmese voice text"}</span><textarea value={renderJob.result_text} readOnly rows={5} aria-label="Generated result" /></label>}
@@ -745,7 +860,7 @@ export default function Home() {
           )}
 
           <div className="upload-footer">
-            <span className="storage-note"><Cloud size={15} /> Stored on your development server</span>
+            <span className="storage-note"><Cloud size={15} /> Stored on your video server</span>
             {uploadState === "uploaded" ? (
               <div className="render-tools">
                 <label className="split-length-field" htmlFor="split-length">
@@ -918,13 +1033,12 @@ export default function Home() {
               placeholder={"1\n00:00:00,000 --> 00:00:03,000\nမြန်မာစာတန်းကို ဒီမှာရေးပါ\n\n2\n00:00:03,000 --> 00:00:06,000\nနောက်စာတန်းတစ်ကြောင်း"}
               spellCheck={false}
             />
+            <p className="subtitle-unicode-note">မြန်မာစာမှန်ကန်စေရန် Unicode ဖြင့်ရေးပါ။ Zawgyi စာသားကို အလိုအလျောက်ပြောင်းမပေးပါ။</p>
             <div className="subtitle-style-grid">
               <label className="style-field">
                 <span>Font</span>
                 <select value={fontFamily} onChange={(event) => setFontFamily(event.target.value)}>
-                  <option>Myanmar Text</option>
                   <option>Noto Sans Myanmar</option>
-                  <option>Arial</option>
                 </select>
               </label>
               <label className="style-field">
@@ -1205,6 +1319,8 @@ export default function Home() {
       </section>
 
       <footer className="page-footer"><span><Clapperboard size={14} /> recapkit</span><span>Built for stories worth sharing.</span></footer>
+        </div>
+      </div>
     </main>
   );
 }

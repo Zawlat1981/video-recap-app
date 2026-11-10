@@ -1,5 +1,6 @@
 export type RenderOperation =
   | "extract-audio"
+  | "trim-video"
   | "burn-subtitles"
   | "split-video"
   | "merge-clips"

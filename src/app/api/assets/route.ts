@@ -1,8 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL?.replace(/\/+$/, "")
+  || (process.env.NODE_ENV === "development" ? "http://localhost:8000" : "");
 
 export async function POST(request: NextRequest) {
+  if (!API_BASE_URL) {
+    return NextResponse.json({ detail: "Video backend is not configured. Set NEXT_PUBLIC_API_URL to your deployed API URL." }, { status: 503 });
+  }
+
   let formData: FormData;
   try {
     formData = await request.formData();

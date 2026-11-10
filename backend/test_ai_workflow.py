@@ -13,7 +13,7 @@ from unittest.mock import Mock, patch
 from zipfile import ZipFile
 
 import imageio_ffmpeg
-from PIL import Image
+from PIL import Image, ImageFont
 from fastapi import HTTPException
 from starlette.datastructures import UploadFile
 
@@ -429,6 +429,59 @@ class HideOriginalSubtitlesTests(unittest.TestCase):
 
 
 class VideoDesignExportTests(unittest.TestCase):
+    def test_bundled_myanmar_font_renders_unicode_subtitles(self) -> None:
+        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        font_path = main._resolve_font_path("NotoSansMyanmar.ttf")
+        self.assertIsNotNone(font_path)
+        self.assertEqual(font_path.name, "NotoSansMyanmar.ttf")
+        font = ImageFont.truetype(str(font_path), 32)
+        self.assertGreater(font.getmask("မင်္ဂလာပါ မြန်မာစာတန်း").getbbox()[2], 0)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_path = root / "source.mp4"
+            renders = root / "renders"
+            working = root / "working"
+            renders.mkdir()
+            working.mkdir()
+            subprocess.run(
+                [
+                    ffmpeg, "-hide_banner", "-loglevel", "error",
+                    "-f", "lavfi", "-i", "color=c=black:s=320x180:d=1:r=12",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-y", str(source_path),
+                ],
+                check=True,
+                capture_output=True,
+            )
+            with patch.object(main, "RENDER_DIRECTORY", renders), patch.object(
+                main, "WORK_DIRECTORY", working
+            ), patch.dict(os.environ, {"VIDEO_FONT_PATH": ""}):
+                output_path = main.burn_subtitles(
+                    uuid.uuid4().hex,
+                    source_path,
+                    {
+                        "subtitle_srt": "1\n00:00:00,000 --> 00:00:01,000\nမင်္ဂလာပါ မြန်မာစာတန်း\n",
+                        "font_family": "Noto Sans Myanmar",
+                        "font_size": 32,
+                        "font_color": "white",
+                        "position": "center",
+                        "outline": 1,
+                    },
+                )
+
+            def first_frame(path: Path) -> bytes:
+                return subprocess.run(
+                    [
+                        ffmpeg, "-hide_banner", "-loglevel", "error",
+                        "-ss", "0.5", "-i", str(path),
+                        "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1",
+                    ],
+                    check=True,
+                    capture_output=True,
+                ).stdout
+
+            self.assertNotEqual(first_frame(source_path), first_frame(output_path))
+
     def test_template_and_animated_text_are_rendered_into_mp4(self) -> None:
         ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
         with tempfile.TemporaryDirectory() as directory:

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL?.replace(/\/+$/, "")
+  || (process.env.NODE_ENV === "development" ? "http://localhost:8000" : "");
 const voices = ["my-MM-NilarNeural", "my-MM-ThihaNeural"] as const;
 const fonts = ["Noto Sans Myanmar", "Myanmar Text", "Arial"] as const;
 const colors = ["white", "yellow", "cyan"] as const;
@@ -19,6 +20,7 @@ const exportPresets = [
 const aiLanguages = ["th", "my", "en"] as const;
 
 const features = [
+  { id: "trim-video", name: "Trim a clip to a custom time range", execution: "backend" },
   { id: "audio-myanmar", name: "Recap TTS and direct dubbing", execution: "backend" },
   { id: "script-voiceover", name: "Speak supplied Burmese script and burn subtitles", execution: "backend" },
   { id: "subtitle", name: "Myanmar subtitle render", execution: "backend" },
@@ -100,6 +102,10 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
+  if (!API_BASE_URL) {
+    return NextResponse.json({ detail: "Video backend is not configured. Set NEXT_PUBLIC_API_URL to your deployed API URL." }, { status: 503 });
+  }
+
   let formData: FormData;
   try {
     formData = await request.formData();
@@ -248,7 +254,7 @@ export async function POST(request: NextRequest) {
     };
   } else if (action === "subtitle") {
     const subtitleSrt = formText(formData, "subtitle_srt");
-    const fontFamily = formText(formData, "font_family", "Myanmar Text");
+    const fontFamily = formText(formData, "font_family", "Noto Sans Myanmar");
     const fontSize = integerField(formData, "font_size", 32);
     const fontColor = formText(formData, "font_color", "white");
     const position = formText(formData, "position", "bottom");
@@ -346,6 +352,19 @@ export async function POST(request: NextRequest) {
       upload_id: "0".repeat(32),
       operation: action,
       merge_clip_ids: mergeClipIds,
+    };
+  } else if (action === "trim-video") {
+    const trimStart = Number(formText(formData, "trim_start_seconds", "0"));
+    const trimEnd = Number(formText(formData, "trim_end_seconds", "0"));
+    if (!Number.isFinite(trimStart) || !Number.isFinite(trimEnd)
+      || trimStart < 0 || trimEnd > 86_400 || trimEnd <= trimStart) {
+      return NextResponse.json({ detail: "Choose a valid trim range with an end time after the start time." }, { status: 422 });
+    }
+    payload = {
+      upload_id: uploadId,
+      operation: action,
+      trim_start_seconds: trimStart,
+      trim_end_seconds: trimEnd,
     };
   } else if (action === "ai-script") {
     const duration = integerField(formData, "ai_script_seconds", 60);

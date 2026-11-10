@@ -51,6 +51,7 @@ CHUNK_SIZE = 1024 * 1024
 
 ALLOWED_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm"}
 STORAGE_DIRECTORY = Path(__file__).resolve().parent / "storage"
+BUNDLED_FONT_DIRECTORY = Path(__file__).resolve().parent / "fonts"
 UPLOAD_DIRECTORY = STORAGE_DIRECTORY / "uploads"
 RENDER_DIRECTORY = STORAGE_DIRECTORY / "renders"
 WORK_DIRECTORY = STORAGE_DIRECTORY / "working"
@@ -134,6 +135,7 @@ class CreateRenderJobRequest(BaseModel):
     upload_id: str
     operation: Literal[
         "extract-audio",
+        "trim-video",
         "burn-subtitles",
         "split-video",
         "merge-clips",
@@ -159,6 +161,8 @@ class CreateRenderJobRequest(BaseModel):
     mode: Literal["recap", "dubbing"] = "recap"
     source_language: Literal["th", "my", "en"] = "th"
     segment_seconds: Literal[30, 60, 120] = 60
+    trim_start_seconds: float = Field(default=0, ge=0, le=86_400)
+    trim_end_seconds: float = Field(default=0, ge=0, le=86_400)
     recap_seconds: int = Field(default=600, ge=30, le=600)
     voice: Literal["my-MM-NilarNeural", "my-MM-ThihaNeural"] = "my-MM-NilarNeural"
     include_original_audio: bool = True
@@ -325,6 +329,59 @@ def split_video(job_id: str, source_path: Path, segment_seconds: int) -> Path:
             segment.unlink(missing_ok=True)
 
 
+def trim_video(job_id: str, source_path: Path, start_seconds: float, end_seconds: float) -> Path:
+    if end_seconds <= start_seconds:
+        raise RuntimeError("The trim end time must be after the start time.")
+
+    output_path = RENDER_DIRECTORY / f"{job_id}-trimmed.mp4"
+    temporary_path = WORK_DIRECTORY / f"{job_id}.trim.partial.mp4"
+    try:
+        result = subprocess.run(
+            [
+                imageio_ffmpeg.get_ffmpeg_exe(),
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-ss",
+                f"{start_seconds:.3f}",
+                "-i",
+                str(source_path),
+                "-t",
+                f"{end_seconds - start_seconds:.3f}",
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a?",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "20",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "160k",
+                "-movflags",
+                "+faststart",
+                str(temporary_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=4 * 60 * 60,
+            check=False,
+        )
+        if result.returncode != 0:
+            output_path.unlink(missing_ok=True)
+            raise RuntimeError(result.stderr.strip()[-1000:] or "FFmpeg could not trim the video.")
+        temporary_path.replace(output_path)
+        return output_path
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
 def merge_clips(
     job_id: str,
     clip_paths: list[Path],
@@ -488,7 +545,9 @@ def burn_subtitles(job_id: str, source_path: Path, parameters: dict[str, str | i
     font_size = int(parameters["font_size"])
     outline = int(parameters["outline"])
     font_family = str(parameters["font_family"])
+    font_path = _resolve_font_path()
     escaped_path = str(subtitle_path.resolve()).replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
+    escaped_font_directory = _escape_filter_path(font_path.parent) if font_path else ""
     style = (
         f"FontName={font_family},FontSize={font_size},"
         f"PrimaryColour={colors[str(parameters['font_color'])]},"
@@ -512,7 +571,8 @@ def burn_subtitles(job_id: str, source_path: Path, parameters: dict[str, str | i
                 "-map",
                 "0:a?",
                 "-vf",
-                f"subtitles=filename='{escaped_path}':force_style='{style}'",
+                f"subtitles=filename='{escaped_path}':"
+                f"fontsdir='{escaped_font_directory}':force_style='{style}'",
                 "-c:v",
                 "libx264",
                 "-preset",
@@ -658,6 +718,8 @@ def _font_options() -> list[dict[str, str]]:
         candidates.append(Path(configured).expanduser())
     candidates.extend((STORAGE_DIRECTORY / "fonts").glob("*.ttf"))
     candidates.extend((STORAGE_DIRECTORY / "fonts").glob("*.otf"))
+    candidates.extend(BUNDLED_FONT_DIRECTORY.glob("*.ttf"))
+    candidates.extend(BUNDLED_FONT_DIRECTORY.glob("*.otf"))
     windows_fonts = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts"
     if windows_fonts.is_dir():
         candidates.extend(windows_fonts.glob("*.ttf"))
@@ -677,6 +739,8 @@ def _resolve_font_path(font_id: object = None) -> Path | None:
     candidates = [Path(configured).expanduser()] if configured else []
     candidates.extend((STORAGE_DIRECTORY / "fonts").glob("*.ttf"))
     candidates.extend((STORAGE_DIRECTORY / "fonts").glob("*.otf"))
+    candidates.extend(BUNDLED_FONT_DIRECTORY.glob("*.ttf"))
+    candidates.extend(BUNDLED_FONT_DIRECTORY.glob("*.otf"))
     windows_fonts = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts"
     if windows_fonts.is_dir():
         candidates.extend(windows_fonts.glob("*.ttf"))
@@ -1288,6 +1352,14 @@ async def render_worker(stop_event: asyncio.Event) -> None:
                 )
             elif operation == "extract-audio":
                 output_path = await asyncio.to_thread(extract_audio, job["id"], source_path)
+            elif operation == "trim-video":
+                output_path = await asyncio.to_thread(
+                    trim_video,
+                    job["id"],
+                    source_path,
+                    parameters.get("trim_start_seconds", 0),
+                    parameters.get("trim_end_seconds", 0),
+                )
             elif operation == "burn-subtitles":
                 output_path = await asyncio.to_thread(
                     burn_subtitles,
@@ -1574,6 +1646,8 @@ async def create_render_job(
         not request.subtitle_srt or "-->" not in request.subtitle_srt
     ):
         raise HTTPException(status_code=422, detail="SRT subtitle text with timecodes is required.")
+    if request.operation == "trim-video" and request.trim_end_seconds <= request.trim_start_seconds:
+        raise HTTPException(status_code=422, detail="The trim end time must be after the start time.")
 
     job_id = uuid.uuid4().hex
     parameters = request.model_dump(
@@ -1589,18 +1663,19 @@ async def create_render_job(
 
 
 @app.post("/api/uploads/from-merge/{job_id}", status_code=201)
-async def upload_merged_video_as_source(job_id: str) -> dict[str, str | int]:
+@app.post("/api/uploads/from-render/{job_id}", status_code=201)
+async def upload_rendered_video_as_source(job_id: str) -> dict[str, str | int]:
     job = get_job(job_id)
-    if job is None or job["operation"] != "merge-clips" or job["status"] != "completed":
-        raise HTTPException(status_code=404, detail="A completed merge job was not found.")
+    if job is None or job["operation"] not in {"merge-clips", "trim-video"} or job["status"] != "completed":
+        raise HTTPException(status_code=404, detail="A completed trim or merge job was not found.")
     output_url = job.get("output_url")
     if not isinstance(output_url, str) or not output_url.startswith("/renders/"):
-        raise HTTPException(status_code=404, detail="The merged video output is unavailable.")
+        raise HTTPException(status_code=404, detail="The rendered video output is unavailable.")
     output_path = RENDER_DIRECTORY / Path(output_url).name
     if output_path.resolve().parent != RENDER_DIRECTORY.resolve() or output_path.suffix.lower() != ".mp4":
-        raise HTTPException(status_code=404, detail="The merged video output is invalid.")
+        raise HTTPException(status_code=404, detail="The rendered video output is invalid.")
     if not output_path.is_file():
-        raise HTTPException(status_code=404, detail="The merged video output is unavailable.")
+        raise HTTPException(status_code=404, detail="The rendered video output is unavailable.")
     if output_path.stat().st_size > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="The merged video exceeds the 2 GB source limit.")
 
@@ -1610,7 +1685,7 @@ async def upload_merged_video_as_source(job_id: str) -> dict[str, str | int]:
         await asyncio.to_thread(shutil.copyfile, output_path, destination_path)
     except OSError as error:
         destination_path.unlink(missing_ok=True)
-        raise HTTPException(status_code=500, detail="Could not prepare the merged video for editing.") from error
+        raise HTTPException(status_code=500, detail="Could not prepare the rendered video for editing.") from error
     return {
         "id": upload_id,
         "filename": f"{upload_id}.mp4",

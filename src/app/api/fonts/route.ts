@@ -1,8 +1,13 @@
 import { NextResponse } from "next/server";
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL?.replace(/\/+$/, "")
+  || (process.env.NODE_ENV === "development" ? "http://localhost:8000" : "");
 
 export async function GET() {
+  if (!API_BASE_URL) {
+    return NextResponse.json({ detail: "Video backend is not configured. Set NEXT_PUBLIC_API_URL to your deployed API URL." }, { status: 503 });
+  }
+
   let upstream: Response;
   try {
     upstream = await fetch(`${API_BASE_URL}/api/fonts`, { cache: "no-store" });

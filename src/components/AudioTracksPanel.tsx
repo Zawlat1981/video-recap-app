@@ -2,8 +2,9 @@
 
 import { ChangeEvent } from "react";
 import type { AssetInfo } from "../lib/phase2";
+import { backendUrl } from "../lib/api";
 
-export type SoundEffect = { asset: AssetInfo; startSeconds: number; volume: number };
+export type SoundEffect = { asset: AssetInfo; startSeconds: number; volume: number; kind?: "effect" | "voiceover" };
 
 type Props = {
   bgm: AssetInfo | null;
@@ -12,10 +13,11 @@ type Props = {
   effects: SoundEffect[];
   onBgmUpload: (file: File) => Promise<void>;
   onEffectUpload: (file: File) => Promise<void>;
+  onVoiceoverUpload: (file: File) => Promise<void>;
   onChange: (changes: Partial<{ bgmVolume: number; ducking: boolean; effects: SoundEffect[] }>) => void;
 };
 
-export function AudioTracksPanel({ bgm, bgmVolume, ducking, effects, onBgmUpload, onEffectUpload, onChange }: Props) {
+export function AudioTracksPanel({ bgm, bgmVolume, ducking, effects, onBgmUpload, onEffectUpload, onVoiceoverUpload, onChange }: Props) {
   function chooseFile(event: ChangeEvent<HTMLInputElement>, callback: (file: File) => Promise<void>) {
     const file = event.target.files?.[0];
     event.target.value = "";
@@ -27,18 +29,27 @@ export function AudioTracksPanel({ bgm, bgmVolume, ducking, effects, onBgmUpload
       <label className="phase2-upload-control">Background music
         <input type="file" accept=".mp3,.wav,.m4a,.aac,.ogg,audio/*" onChange={(event) => chooseFile(event, onBgmUpload)} />
       </label>
-      {bgm && <div className="phase2-track"><strong>{bgm.filename}</strong><audio src={`${process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"}${bgm.asset_url}`} controls preload="metadata" /></div>}
+      {bgm && <div className="phase2-track"><strong>{bgm.filename}</strong><audio src={backendUrl(bgm.asset_url)} controls preload="metadata" /></div>}
       <label>BGM volume <strong>{Math.round(bgmVolume * 100)}%</strong>
         <input type="range" min={0} max={1} step={0.05} value={bgmVolume} disabled={!bgm} onChange={(event) => onChange({ bgmVolume: Number(event.target.value) })} />
       </label>
       <label className="phase2-check"><input type="checkbox" checked={ducking} disabled={!bgm} onChange={(event) => onChange({ ducking: event.target.checked })} />Duck music under source audio</label>
+      <label className="phase2-upload-control">Add your recorded Burmese voiceover
+        <input
+          type="file"
+          accept=".mp3,.wav,.m4a,.aac,.ogg,audio/*"
+          onChange={(event) => chooseFile(event, onVoiceoverUpload)}
+          disabled={effects.some((effect) => effect.kind === "voiceover")}
+        />
+      </label>
       <label className="phase2-upload-control">Add sound effect
         <input type="file" accept=".mp3,.wav,.m4a,.aac,.ogg,audio/*" onChange={(event) => chooseFile(event, onEffectUpload)} />
       </label>
       <div className="phase2-track-list">
         {effects.map((effect, index) => (
           <div className="phase2-track" key={effect.asset.id}>
-            <strong>{effect.asset.filename}</strong>
+            <strong>{effect.kind === "voiceover" ? `Voiceover · ${effect.asset.filename}` : effect.asset.filename}</strong>
+            <audio src={backendUrl(effect.asset.asset_url)} controls preload="metadata" />
             <label>Start <input type="number" min={0} step={0.1} value={effect.startSeconds} onChange={(event) => onChange({ effects: effects.map((item, current) => current === index ? { ...item, startSeconds: Math.max(0, Number(event.target.value)) } : item) })} /></label>
             <label>Volume <input type="range" min={0} max={1} step={0.05} value={effect.volume} onChange={(event) => onChange({ effects: effects.map((item, current) => current === index ? { ...item, volume: Number(event.target.value) } : item) })} /></label>
             <button type="button" className="button button-secondary" onClick={() => onChange({ effects: effects.filter((_, current) => current !== index) })}>Remove</button>

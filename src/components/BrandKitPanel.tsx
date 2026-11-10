@@ -65,7 +65,7 @@ export function BrandKitPanel({
         </select>
       </label>
       {fontError && <p className="phase2-error" role="alert">{fontError}</p>}
-      {!fonts.length && !fontError && <small className="phase2-help">Install a TTF/OTF in backend/storage/fonts or set VIDEO_FONT_PATH to enable font choices.</small>}
+      {!fonts.length && !fontError && <small className="phase2-help">Bundled Noto Sans Myanmar is used by default. Additional fonts can be installed in backend/storage/fonts or set with VIDEO_FONT_PATH.</small>}
       <label className="phase2-upload-control">
         Logo watermark (PNG/JPG/WEBP)
         <input type="file" accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp" onChange={chooseLogo} />
@@ -78,7 +78,7 @@ export function BrandKitPanel({
       </>}
       <label className="phase2-check"><input type="checkbox" checked={introEnabled} onChange={(event) => onChange({ introEnabled: event.target.checked })} />Add 3-second RecapKit intro</label>
       <label className="phase2-check"><input type="checkbox" checked={outroEnabled} onChange={(event) => onChange({ outroEnabled: event.target.checked })} />Add 5-second Burmese subscribe outro</label>
-      <p className="phase2-help">Font options are discovered from the backend’s configured font and backend/storage/fonts. Never upload secrets in a font file.</p>
+      <p className="phase2-help">The bundled Noto Sans Myanmar font is available for Burmese text on the browser and render server. Extra fonts can be configured on the backend.</p>
     </div>
   );
 }
