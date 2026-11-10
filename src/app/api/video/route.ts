@@ -464,11 +464,14 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  const body = await upstream.text();
   let result: unknown;
   try {
-    result = await upstream.json();
+    result = JSON.parse(body);
   } catch {
-    return NextResponse.json({ detail: "The video backend returned an invalid response." }, { status: 502 });
+    return NextResponse.json({
+      detail: `Render server returned a non-JSON response (HTTP ${upstream.status}). It may be restarting or overloaded; try again in a moment.`,
+    }, { status: 502 });
   }
   return NextResponse.json(result, { status: upstream.status });
 }

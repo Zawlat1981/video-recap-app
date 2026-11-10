@@ -298,7 +298,9 @@ export default function Home() {
             setError(message);
             return;
           }
-          throw new Error(message);
+          setError(`${message} Job status ကို အလိုအလျောက် ပြန်စစ်နေပါတယ်။`);
+          timeout = window.setTimeout(pollJob, 5000);
+          return;
         }
         const updatedJob = await response.json() as RenderJob;
         setRenderJob(updatedJob);
