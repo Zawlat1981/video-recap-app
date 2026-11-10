@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: recapkit-video-backend
+    runtime: docker
+    plan: 1c-2g
+    region: singapore
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    autoDeploy: true
+    disk:
+      name: recapkit-storage
+      mountPath: /data
+      sizeGB: 20
+    envVars:
+      - key: RECAPKIT_API_KEY
+        sync: false
+      - key: RECAPKIT_REQUIRE_API_KEY
+        value: "true"
+      - key: RECAPKIT_STORAGE_DIR
+        value: /data
+      - key: CORS_ORIGINS
+        value: https://video-recap-app.vercel.app

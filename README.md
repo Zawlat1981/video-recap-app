@@ -1,13 +1,3 @@
----
-title: Video Recap Backend
-emoji: 🎥
-colorFrom: blue
-colorTo: indigo
-sdk: docker
-app_port: 7860
-pinned: false
----
-
 # RecapKit Video Studio
 
 RecapKit is a Next.js creator workspace with a FastAPI/FFmpeg render queue for Burmese recap and dubbing workflows. A licensed Noto Sans Myanmar font is bundled for browser previews and video subtitle rendering; enter Burmese captions as Unicode text.
@@ -28,17 +18,18 @@ Run frontend checks with `npm run lint`, `npx tsc --noEmit`, and `npm run build`
 
 ## Use on Vercel and mobile
 
-The Next.js frontend is responsive and can be deployed to Vercel. Vercel does **not** host this app's FastAPI/FFmpeg render worker or its persistent uploads, renders, and SQLite database. Deploy the backend separately on a service with FFmpeg support, a persistent volume, and a long-running worker; configure its public HTTPS URL as the Vercel environment variable `NEXT_PUBLIC_API_URL` and redeploy. Set the backend's `CORS_ORIGINS` to the exact Vercel production domain (and any custom domain), and configure provider credentials and `VIDEO_FONT_PATH` on the backend host. Uploads go directly from the browser to the API, so they do not pass through Vercel's request-body limit.
+The Next.js frontend is deployed on Vercel; its FastAPI/FFmpeg worker runs separately on Render. Uploads go directly from the browser to the API and do not pass through Vercel's request-body limit. `NEXT_PUBLIC_API_URL` can override the default Render service URL (`https://recapkit-video-backend.onrender.com`) in the Vercel project settings.
 
 On a phone, open the Vercel URL in the browser. The feature menu becomes a horizontally scrollable toolbar; choose a workspace, upload the source video, and use trim, subtitle, voice, and export controls. Exports are rendered by the separately hosted backend.
 
-## Deploy the backend to Hugging Face Spaces
+## Deploy the backend to Render
 
-This repository includes a Docker Space configuration. Create a Space using Docker, connect this repository (or push its `main` branch to the Space), and configure these Space settings before making it public:
+The root `render.yaml` Blueprint builds the Docker backend as `recapkit-video-backend` in Singapore, adds a 20 GB persistent disk at `/data`, enables the `/health` check, and requires an API key. Video rendering needs CPU/RAM and persistent storage, so this configuration uses Render's paid `1c-2g` plan; review Render's current price and disk charges before deploying.
 
-- Add `RECAPKIT_API_KEY` as a **Secret** with a long, randomly generated value. Never commit or share the value.
-- Keep `RECAPKIT_REQUIRE_API_KEY=true`; the Docker image enables it and refuses API requests if the secret is missing.
-- Enable persistent storage mounted at `/data`; uploads, renders, assets, and the SQLite job database are stored there.
-- Set Space visibility to public only after the secret is configured. API routes require the key; `/health` is public, and generated media URLs are unguessable.
+1. Push this repository to GitHub and open the Render Dashboard. Choose **New > Blueprint**, connect `Zawlat1981/video-recap-app`, and deploy the `main` branch.
+2. When prompted, set `RECAPKIT_API_KEY` to a long random secret. You may reuse the secret already saved in Hugging Face, or generate a new one. Never commit it or send it in chat.
+3. Wait until the service reports **Live** and `https://recapkit-video-backend.onrender.com/health` returns `{"status":"ok"}`.
+4. In Vercel project settings, set `NEXT_PUBLIC_API_URL` to `https://recapkit-video-backend.onrender.com` for Production and redeploy. The frontend defaults to this URL as well, but the explicit Vercel setting ensures it is clear which backend is active.
+5. In RecapKit, choose **Backend access** and enter the same Render secret on each device. It is stored only in that browser's local storage.
 
-After the Space finishes building, set `NEXT_PUBLIC_API_URL` in the Vercel project to the Space's HTTPS URL and redeploy. In the app, choose **Backend access** and enter the same Space Secret value on each device that will edit videos. The key is stored in that browser's local storage; use HTTPS and do not enter it on shared devices. The app does not pass uploads through Vercel.
+Render's persistent disk preserves uploads, renders, temporary work, and job state across deploys. The API key protects API routes; health checks are public, while UUID media URLs remain available to browser playback/download.

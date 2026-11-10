@@ -1,7 +1,7 @@
 export const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL?.replace(/\/+$/, "")
   || (process.env.NODE_ENV === "development"
     ? "http://localhost:8000"
-    : "https://aungzawlatt-video-recap-backend.hf.space");
+    : "https://recapkit-video-backend.onrender.com");
 
 const API_KEY_STORAGE_KEY = "recapkit-api-key";
 

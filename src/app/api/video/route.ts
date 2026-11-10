@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL?.replace(/\/+$/, "")
   || (process.env.NODE_ENV === "development"
     ? "http://localhost:8000"
-    : "https://aungzawlatt-video-recap-backend.hf.space");
+    : "https://recapkit-video-backend.onrender.com");
 const voices = ["my-MM-NilarNeural", "my-MM-ThihaNeural"] as const;
 const fonts = ["Noto Sans Myanmar", "Myanmar Text", "Arial"] as const;
 const colors = ["white", "yellow", "cyan"] as const;
