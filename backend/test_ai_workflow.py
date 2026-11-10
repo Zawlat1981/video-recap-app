@@ -38,11 +38,16 @@ class AIProviderTests(unittest.TestCase):
             {"RECAPKIT_API_KEY": "test-secret", "RECAPKIT_REQUIRE_API_KEY": "true"},
         ), TestClient(main.app) as client:
             self.assertEqual(client.get("/health").status_code, 200)
-            self.assertEqual(client.get("/api/fonts").status_code, 401)
-            self.assertEqual(
-                client.get("/api/fonts", headers={"X-API-Key": "wrong-secret"}).status_code,
-                401,
-            )
+            for headers in (
+                {"Origin": "https://video-recap-app.vercel.app"},
+                {"Origin": "https://video-recap-app.vercel.app", "X-API-Key": "wrong-secret"},
+            ):
+                unauthorized = client.get("/api/fonts", headers=headers)
+                self.assertEqual(unauthorized.status_code, 401)
+                self.assertEqual(
+                    unauthorized.headers.get("access-control-allow-origin"),
+                    "https://video-recap-app.vercel.app",
+                )
             self.assertEqual(
                 client.get("/api/fonts", headers={"X-API-Key": "test-secret"}).status_code,
                 200,
@@ -72,9 +77,13 @@ class AIProviderTests(unittest.TestCase):
     def test_required_api_key_fails_closed_when_missing(self) -> None:
         with patch.dict(os.environ, {"RECAPKIT_REQUIRE_API_KEY": "true"}, clear=True):
             with TestClient(main.app) as client:
-                response = client.get("/api/fonts")
+                response = client.get("/api/fonts", headers={"Origin": "https://video-recap-app.vercel.app"})
         self.assertEqual(response.status_code, 503)
         self.assertIn("not been configured", response.json()["detail"])
+        self.assertEqual(
+            response.headers.get("access-control-allow-origin"),
+            "https://video-recap-app.vercel.app",
+        )
 
     def test_story_script_uses_burmese_original_story_prompt(self) -> None:
         response = Mock()

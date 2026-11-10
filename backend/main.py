@@ -80,20 +80,6 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="RecapKit API", version="0.2.0", lifespan=lifespan)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        origin.strip()
-        for origin in os.getenv(
-            "CORS_ORIGINS",
-            "https://video-recap-app.vercel.app,http://localhost:3000,http://127.0.0.1:3000",
-        ).split(",")
-        if origin.strip()
-    ],
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["*"],
-)
 
 
 @app.middleware("http")
@@ -114,6 +100,22 @@ async def require_api_key(request: Request, call_next):
     if api_key and not hmac.compare_digest(supplied_key, api_key.encode("utf-8")):
         return JSONResponse(status_code=401, content={"detail": "A valid X-API-Key header is required."})
     return await call_next(request)
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        origin.strip()
+        for origin in os.getenv(
+            "CORS_ORIGINS",
+            "https://video-recap-app.vercel.app,http://localhost:3000,http://127.0.0.1:3000",
+        ).split(",")
+        if origin.strip()
+    ],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+)
 
 
 app.mount("/media", StaticFiles(directory=UPLOAD_DIRECTORY), name="media")
