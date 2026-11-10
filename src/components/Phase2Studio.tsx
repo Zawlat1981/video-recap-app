@@ -10,7 +10,7 @@ import { Phase3Studio } from "./Phase3Studio";
 import type { Phase3Tab } from "./Phase3Studio";
 import type { AssetInfo, ElementOverlay, RenderJob, RenderOperation } from "../lib/phase2";
 import type { CreatorTemplate } from "../lib/templates";
-import { backendUrl } from "../lib/api";
+import { backendAuthHeaders, backendUrl } from "../lib/api";
 
 const tabs = [
   { id: "elements", label: "Elements" },
@@ -105,7 +105,7 @@ export function Phase2Studio({
     const formData = new FormData();
     formData.set("file", file);
     formData.set("category", category);
-    const response = await fetch(backendUrl("/api/assets"), { method: "POST", body: formData });
+    const response = await fetch(backendUrl("/api/assets"), { method: "POST", body: formData, headers: backendAuthHeaders() });
     const result = await response.json() as AssetInfo & { detail?: string };
     if (!response.ok) throw new Error(result.detail ?? `${category} upload failed.`);
     return result;
@@ -157,7 +157,7 @@ export function Phase2Studio({
       const uploads = await Promise.all(files.map(async (file) => {
         const formData = new FormData();
         formData.set("file", file);
-        const response = await fetch(backendUrl("/api/uploads"), { method: "POST", body: formData });
+        const response = await fetch(backendUrl("/api/uploads"), { method: "POST", body: formData, headers: backendAuthHeaders() });
         const result = await response.json() as { id?: string; filename?: string; detail?: string };
         if (!response.ok || !result.id) throw new Error(result.detail ?? `Could not upload ${file.name}.`);
         return { id: result.id, filename: result.filename ?? file.name };
@@ -215,7 +215,7 @@ export function Phase2Studio({
     });
 
     try {
-      const response = await fetch("/api/video", { method: "POST", body: formData });
+      const response = await fetch("/api/video", { method: "POST", body: formData, headers: backendAuthHeaders() });
       const result = await response.json() as RenderJob & { detail?: string };
       if (!response.ok) throw new Error(result.detail ?? "Render job could not be started.");
       onJob(result);

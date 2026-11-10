@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL?.replace(/\/+$/, "")
-  || (process.env.NODE_ENV === "development" ? "http://localhost:8000" : "");
+  || (process.env.NODE_ENV === "development"
+    ? "http://localhost:8000"
+    : "https://aungzawlatt-video-recap-backend.hf.space");
 
 export async function POST(request: NextRequest) {
   if (!API_BASE_URL) {
@@ -23,9 +25,11 @@ export async function POST(request: NextRequest) {
 
   let upstream: Response;
   try {
+    const apiKey = request.headers.get("x-api-key");
     upstream = await fetch(`${API_BASE_URL}/api/assets`, {
       method: "POST",
       body: formData,
+      headers: apiKey ? { "X-API-Key": apiKey } : undefined,
       cache: "no-store",
     });
   } catch {

@@ -38,7 +38,7 @@ import type { Phase2Tab } from "../components/Phase2Studio";
 import type { Phase3Tab } from "../components/Phase3Studio";
 import type { RenderJob } from "../lib/phase2";
 import type { CreatorTemplate } from "../lib/templates";
-import { API_BASE_URL, backendUrl } from "../lib/api";
+import { API_BASE_URL, backendAuthHeaders, backendUrl, getBackendApiKey, saveBackendApiKey } from "../lib/api";
 
 const MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024;
 const modes = [
@@ -187,6 +187,8 @@ export default function Home() {
   const [activePhase3Tab, setActivePhase3Tab] = useState<Phase3Tab>("templates");
   const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceDestination>("source");
   const [chatInput, setChatInput] = useState("");
+  const [apiKeyInput, setApiKeyInput] = useState("");
+  const [showApiKeySettings, setShowApiKeySettings] = useState(false);
   const [chatMessages, setChatMessages] = useState<AngelMessage[]>([
     { role: "angel", text: "Mingalaba! Upload a video, then ask me to add subtitles, hide the original subtitles, or create a Burmese recap voiceover." },
   ]);
@@ -210,7 +212,7 @@ export default function Home() {
     if (!API_BASE_URL) return;
 
     const controller = new AbortController();
-    void fetch(backendUrl(`/api/jobs/${savedJobId}`), { signal: controller.signal })
+    void fetch(backendUrl(`/api/jobs/${savedJobId}`), { signal: controller.signal, headers: backendAuthHeaders() })
       .then(async (response) => {
         if (!response.ok) throw new Error("Saved render job is no longer available.");
         const savedJob = await response.json() as RenderJob;
@@ -235,7 +237,7 @@ export default function Home() {
 
     async function pollJob() {
       try {
-        const response = await fetch(backendUrl(`/api/jobs/${activeJobId}`), { signal: controller.signal });
+        const response = await fetch(backendUrl(`/api/jobs/${activeJobId}`), { signal: controller.signal, headers: backendAuthHeaders() });
         if (!response.ok) throw new Error("Job status could not be loaded.");
         const updatedJob = await response.json() as RenderJob;
         setRenderJob(updatedJob);
@@ -360,6 +362,7 @@ export default function Home() {
         const uploadResponse = await fetch(backendUrl("/api/uploads"), {
           method: "POST",
           body: uploadData,
+          headers: backendAuthHeaders(),
         });
         const uploadResult = await uploadResponse.json() as { id?: string; detail?: string };
         if (!uploadResponse.ok || !uploadResult.id) {
@@ -372,7 +375,7 @@ export default function Home() {
       const jobData = new FormData();
       jobData.set("action", "merge-clips");
       jobData.set("merge_clip_ids", JSON.stringify(clipIds));
-      const jobResponse = await fetch("/api/video", { method: "POST", body: jobData });
+      const jobResponse = await fetch("/api/video", { method: "POST", body: jobData, headers: backendAuthHeaders() });
       const jobResult = await jobResponse.json() as RenderJob & { detail?: string };
       if (!jobResponse.ok) throw new Error(jobResult.detail ?? "Could not start the merge job.");
 
@@ -390,7 +393,7 @@ export default function Home() {
     setPromotingMerge(true);
     setError(null);
     try {
-      const response = await fetch(backendUrl(`/api/uploads/from-render/${renderJob.id}`), { method: "POST" });
+      const response = await fetch(backendUrl(`/api/uploads/from-render/${renderJob.id}`), { method: "POST", headers: backendAuthHeaders() });
       const result = await response.json() as { id?: string; filename?: string; media_url?: string; detail?: string };
       if (!response.ok || !result.id || !result.media_url) {
         throw new Error(result.detail ?? "Could not load the rendered video as the current source.");
@@ -433,6 +436,8 @@ export default function Home() {
     const request = new XMLHttpRequest();
     try {
       request.open("POST", backendUrl("/api/uploads"));
+      const apiKey = getBackendApiKey();
+      if (apiKey) request.setRequestHeader("X-API-Key", apiKey);
     } catch (uploadError: unknown) {
       setError(uploadError instanceof Error ? uploadError.message : "The video backend is not configured.");
       setUploadState("error");
@@ -489,9 +494,11 @@ export default function Home() {
               : operation === "export-video"
                 ? { upload_id: uploadId, operation, template_ratio: templateRatio, text_overlay: textOverlay, text_animation: textAnimation, text_position: textPosition, text_size: textSize, text_color: textColor }
             : { upload_id: uploadId, operation };
+      const headers = backendAuthHeaders();
+      headers.set("Content-Type", "application/json");
       const response = await fetch(backendUrl("/api/jobs"), {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify(payload),
       });
       const result = await response.json() as RenderJob & { detail?: string };
@@ -561,7 +568,7 @@ export default function Home() {
     setStartingJob(true);
     setError(null);
     try {
-      const response = await fetch("/api/video", { method: "POST", body: formData });
+      const response = await fetch("/api/video", { method: "POST", body: formData, headers: backendAuthHeaders() });
       const result = await response.json() as RenderJob & { detail?: string };
       if (!response.ok) throw new Error(result.detail ?? "The Phase 1 action could not be started.");
       setRenderJob(result);
@@ -666,7 +673,15 @@ export default function Home() {
       setActivePhase2Tab(destination);
       sectionId = "phase2";
     }
+
     window.setTimeout(() => document.getElementById(sectionId)?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
+  }
+
+  function saveApiKey(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    saveBackendApiKey(apiKeyInput);
+    setShowApiKeySettings(false);
+    setError(null);
   }
 
   return (
@@ -681,11 +696,41 @@ export default function Home() {
         </a>
         <div className="top-actions">
           <span className="status-pill"><span className="status-dot" /> {API_BASE_URL ? "Backend URL configured" : "Backend not configured"}</span>
+          <button
+            className="button button-secondary"
+            type="button"
+            onClick={() => {
+              setApiKeyInput(getBackendApiKey());
+              setShowApiKeySettings(true);
+            }}
+          >
+            Backend access
+          </button>
           <button className="profile-button" type="button" aria-label="Open export workspace" onClick={() => navigateWorkspace("export")}>
             <Settings size={17} />
           </button>
         </div>
       </header>
+
+      {showApiKeySettings && (
+        <div className="api-key-backdrop" role="dialog" aria-modal="true" aria-labelledby="api-key-title" onMouseDown={(event) => {
+          if (event.target === event.currentTarget) setShowApiKeySettings(false);
+        }}>
+          <form className="api-key-panel" onSubmit={saveApiKey} aria-labelledby="api-key-title">
+            <button className="api-key-close" type="button" onClick={() => setShowApiKeySettings(false)} aria-label="Close API key settings">
+              <X size={18} />
+            </button>
+            <h2 id="api-key-title">Backend access</h2>
+            <p>Enter the API key configured in your backend host’s Secrets. The key stays in this browser and is not included in the deployed app.</p>
+            <label htmlFor="backend-api-key">API key</label>
+            <input id="backend-api-key" type="password" autoComplete="off" value={apiKeyInput} onChange={(event) => setApiKeyInput(event.target.value)} />
+            <div className="api-key-actions">
+              <button className="button button-secondary" type="button" onClick={() => setApiKeyInput("")}>Clear</button>
+              <button className="button button-primary" type="submit">Save on this device</button>
+            </div>
+          </form>
+        </div>
+      )}
 
       <div className="studio-layout">
         <aside className="studio-sidebar" aria-label="Editing features">

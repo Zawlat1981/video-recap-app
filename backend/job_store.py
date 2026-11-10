@@ -1,11 +1,15 @@
 import json
+import os
 import sqlite3
 from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-DATABASE_PATH = Path(__file__).resolve().parent / "storage" / "jobs.sqlite3"
+STORAGE_DIRECTORY = Path(
+    os.getenv("RECAPKIT_STORAGE_DIR", str(Path(__file__).resolve().parent / "storage"))
+).expanduser().resolve()
+DATABASE_PATH = STORAGE_DIRECTORY / "jobs.sqlite3"
 
 
 def _connect() -> sqlite3.Connection:

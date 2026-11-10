@@ -11,7 +11,9 @@ from backend.ai_providers import (
     translate_to_burmese,
 )
 
-STORAGE_DIRECTORY = Path(__file__).resolve().parent / "storage"
+STORAGE_DIRECTORY = Path(
+    os.getenv("RECAPKIT_STORAGE_DIR", str(Path(__file__).resolve().parent / "storage"))
+).expanduser().resolve()
 WORK_DIRECTORY = STORAGE_DIRECTORY / "working"
 RENDER_DIRECTORY = STORAGE_DIRECTORY / "renders"
 

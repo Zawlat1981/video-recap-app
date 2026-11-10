@@ -15,6 +15,7 @@ from zipfile import ZipFile
 import imageio_ffmpeg
 from PIL import Image, ImageFont
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 from starlette.datastructures import UploadFile
 
 from backend.ai_pro import generate_story_script
@@ -31,6 +32,50 @@ from backend.voiceover import create_recap_dub, srt_to_plain_text
 
 
 class AIProviderTests(unittest.TestCase):
+    def test_api_key_protects_api_but_allows_health_and_cors_preflight(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"RECAPKIT_API_KEY": "test-secret", "RECAPKIT_REQUIRE_API_KEY": "true"},
+        ), TestClient(main.app) as client:
+            self.assertEqual(client.get("/health").status_code, 200)
+            self.assertEqual(client.get("/api/fonts").status_code, 401)
+            self.assertEqual(
+                client.get("/api/fonts", headers={"X-API-Key": "wrong-secret"}).status_code,
+                401,
+            )
+            self.assertEqual(
+                client.get("/api/fonts", headers={"X-API-Key": "test-secret"}).status_code,
+                200,
+            )
+            preflight = client.options(
+                "/api/fonts",
+                headers={
+                    "Origin": "https://video-recap-app.vercel.app",
+                    "Access-Control-Request-Method": "GET",
+                    "Access-Control-Request-Headers": "x-api-key",
+                },
+            )
+            self.assertEqual(preflight.status_code, 200)
+            self.assertEqual(
+                preflight.headers.get("access-control-allow-origin"),
+                "https://video-recap-app.vercel.app",
+            )
+            media_path = main.UPLOAD_DIRECTORY / f"{uuid.uuid4().hex}.mp4"
+            media_path.write_bytes(b"media")
+            try:
+                media = client.get(f"/media/{media_path.name}")
+                self.assertEqual(media.status_code, 200)
+                self.assertEqual(media.content, b"media")
+            finally:
+                media_path.unlink(missing_ok=True)
+
+    def test_required_api_key_fails_closed_when_missing(self) -> None:
+        with patch.dict(os.environ, {"RECAPKIT_REQUIRE_API_KEY": "true"}, clear=True):
+            with TestClient(main.app) as client:
+                response = client.get("/api/fonts")
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("not been configured", response.json()["detail"])
+
     def test_story_script_uses_burmese_original_story_prompt(self) -> None:
         response = Mock()
         response.choices = [Mock()]

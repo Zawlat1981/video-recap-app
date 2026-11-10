@@ -202,6 +202,77 @@ a {
   gap: 16px;
 }
 
+.api-key-backdrop {
+  align-items: center;
+  background: rgb(20 37 40 / 48%);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  padding: 20px;
+  position: fixed;
+  z-index: 20;
+}
+
+.api-key-panel {
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  box-shadow: 0 24px 80px rgb(22 46 50 / 24%);
+  max-width: 460px;
+  padding: 28px;
+  position: relative;
+  width: 100%;
+}
+
+.api-key-panel h2 {
+  font-size: 21px;
+  margin: 0 0 10px;
+}
+
+.api-key-panel p {
+  color: var(--ink-muted);
+  font-size: 13px;
+  line-height: 1.6;
+  margin: 0 0 20px;
+}
+
+.api-key-panel label {
+  display: block;
+  font-size: 12px;
+  font-weight: 700;
+  margin-bottom: 7px;
+}
+
+.api-key-panel input {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font: inherit;
+  min-height: 42px;
+  padding: 9px 11px;
+  width: 100%;
+}
+
+.api-key-close {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: var(--ink-muted);
+  cursor: pointer;
+  display: flex;
+  justify-content: center;
+  padding: 6px;
+  position: absolute;
+  right: 15px;
+  top: 15px;
+}
+
+.api-key-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+
 .status-pill {
   align-items: center;
   color: #5b6d71;
@@ -2024,6 +2095,8 @@ a {
   .workspace-menu summary { font-size: 0; gap: 4px; }
   .workspace-menu summary svg:first-child { height: 17px; width: 17px; }
   .workspace-menu summary svg:last-child { height: 11px; width: 11px; }
+  .top-actions { gap: 6px; }
+  .top-actions > .button { font-size: 10px; min-height: 34px; padding: 0 9px; }
   .workspace-menu-popover { grid-template-columns: minmax(0, 1fr); }
   .intro h1 { font-size: 36px; }
   .panel-heading h2, .section-title-row h2 { font-size: 17px; }

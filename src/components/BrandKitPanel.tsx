@@ -2,6 +2,7 @@
 
 import { ChangeEvent, useEffect, useState } from "react";
 import type { AssetInfo } from "../lib/phase2";
+import { backendAuthHeaders } from "../lib/api";
 
 type Props = {
   primary: string;
@@ -36,7 +37,7 @@ export function BrandKitPanel({
 
   useEffect(() => {
     const controller = new AbortController();
-    void fetch("/api/fonts", { signal: controller.signal })
+    void fetch("/api/fonts", { signal: controller.signal, headers: backendAuthHeaders() })
       .then(async (response) => {
         const result = await response.json() as { fonts?: FontOption[]; detail?: string };
         if (!response.ok) throw new Error(result.detail ?? "Font list could not be loaded.");

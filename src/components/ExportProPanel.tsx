@@ -3,7 +3,7 @@
 import { ChangeEvent, useState } from "react";
 import { Download, Film, Smartphone, UploadCloud } from "lucide-react";
 import type { RenderOperation } from "../lib/phase2";
-import { backendUrl } from "../lib/api";
+import { backendAuthHeaders, backendUrl } from "../lib/api";
 
 const presets = [
   { id: "youtube-1080", label: "YouTube 1080p", size: "1920 × 1080", detail: "H.264 · 30 fps" },
@@ -40,7 +40,7 @@ export function ExportProPanel({ hasVideo, busy, onRun }: Props) {
       const uploaded = await Promise.all(files.map(async (file) => {
         const formData = new FormData();
         formData.set("file", file);
-        const response = await fetch(backendUrl("/api/uploads"), { method: "POST", body: formData });
+        const response = await fetch(backendUrl("/api/uploads"), { method: "POST", body: formData, headers: backendAuthHeaders() });
         const data = await response.json() as { id?: string; filename?: string; detail?: string };
         if (!response.ok || !data.id) throw new Error(data.detail ?? `Could not upload ${file.name}.`);
         return { id: data.id, filename: data.filename ?? file.name };

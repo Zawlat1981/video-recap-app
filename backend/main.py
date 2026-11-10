@@ -1,4 +1,5 @@
 import asyncio
+import hmac
 import os
 import re
 import shutil
@@ -11,12 +12,15 @@ from pathlib import Path
 from typing import AsyncIterator, Literal
 
 import imageio_ffmpeg
-from fastapi import FastAPI, Form, HTTPException, UploadFile
+from fastapi import FastAPI, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field, model_validator
 from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from backend.job_store import (
     claim_next_job,
@@ -44,13 +48,13 @@ from backend.magic_tools import (
 )
 from backend.voiceover import create_recap_dub, srt_to_plain_text
 
-load_dotenv(Path(__file__).resolve().parent.parent / ".env")
-
 MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024
 CHUNK_SIZE = 1024 * 1024
 
 ALLOWED_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm"}
-STORAGE_DIRECTORY = Path(__file__).resolve().parent / "storage"
+STORAGE_DIRECTORY = Path(
+    os.getenv("RECAPKIT_STORAGE_DIR", str(Path(__file__).resolve().parent / "storage"))
+).expanduser().resolve()
 BUNDLED_FONT_DIRECTORY = Path(__file__).resolve().parent / "fonts"
 UPLOAD_DIRECTORY = STORAGE_DIRECTORY / "uploads"
 RENDER_DIRECTORY = STORAGE_DIRECTORY / "renders"
@@ -87,9 +91,31 @@ app.add_middleware(
         if origin.strip()
     ],
     allow_credentials=True,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def require_api_key(request: Request, call_next):
+    if request.method == "OPTIONS" or request.url.path == "/health" or request.url.path.startswith(
+        ("/media/", "/renders/", "/assets/")
+    ):
+        return await call_next(request)
+
+    api_key = os.getenv("RECAPKIT_API_KEY", "")
+    required = os.getenv("RECAPKIT_REQUIRE_API_KEY", "false").strip().lower() in {"1", "true", "yes"}
+    if required and not api_key:
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Backend API key is required but has not been configured."},
+        )
+    supplied_key = request.headers.get("X-API-Key", "").encode("utf-8")
+    if api_key and not hmac.compare_digest(supplied_key, api_key.encode("utf-8")):
+        return JSONResponse(status_code=401, content={"detail": "A valid X-API-Key header is required."})
+    return await call_next(request)
+
+
 app.mount("/media", StaticFiles(directory=UPLOAD_DIRECTORY), name="media")
 app.mount("/renders", StaticFiles(directory=RENDER_DIRECTORY), name="renders")
 app.mount("/assets", StaticFiles(directory=ASSET_DIRECTORY), name="assets")

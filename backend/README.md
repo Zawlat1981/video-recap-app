@@ -9,7 +9,7 @@ pinned: false
 
 # RecapKit API
 
-The backend accepts video and media uploads, stores them locally under `backend/storage`, and queues FFmpeg audio extraction, subtitle rendering, subtitle hiding, video splitting, voiceover, template/element export, audio mixing, image-to-video, and magic-tool jobs. Job state and generated scripts are persisted in SQLite at `backend/storage/jobs.sqlite3`.
+The backend accepts video and media uploads, stores them under `RECAPKIT_STORAGE_DIR` (default: `backend/storage`), and queues FFmpeg audio extraction, subtitle rendering, subtitle hiding, video splitting, voiceover, template/element export, audio mixing, image-to-video, and magic-tool jobs. Job state and generated scripts are persisted in SQLite at `<RECAPKIT_STORAGE_DIR>/jobs.sqlite3`.
 
 From the project root, create and activate a Python 3.11 virtual environment, then install the backend and test requirements:
 
@@ -68,4 +68,10 @@ The grouped Workspace menu links to the existing project, design, AI, and export
 
 A completed job stores any generated recap/translation in `result_text` and its rendered file under `/renders/`. Poll `GET http://localhost:8000/api/jobs/<job-id>` until `completed` or `failed`.
 
-Run the backend tests with `python -m pytest backend`. FFmpeg is provided by the `imageio-ffmpeg` Python package, so a system-wide FFmpeg install is not required. Azure TTS has a 10-minute per-request output limit. Uploads, renders, working files, and the SQLite database are local and ignored by Git. On API startup, jobs left `running` by a crash are requeued. This setup intentionally uses one local worker; deploy multiple workers or long-running production jobs with a broker-backed queue such as Celery/Redis. Authentication and cloud storage are not included yet. The Next.js page uses this API by default; set `NEXT_PUBLIC_API_URL` if the API runs at another origin.
+Run the backend tests with `python -m pytest backend`. FFmpeg is provided by the `imageio-ffmpeg` Python package, so a system-wide FFmpeg install is not required. Azure TTS has a 10-minute per-request output limit. On API startup, jobs left `running` by a crash are requeued. This setup intentionally uses one local worker; deploy multiple workers or long-running production jobs with a broker-backed queue such as Celery/Redis.
+
+## API-key protection and deployment storage
+
+Set `RECAPKIT_API_KEY` on the backend host to require `X-API-Key` on API routes; use a long random value and never commit it. Set `RECAPKIT_REQUIRE_API_KEY=true` to fail closed with HTTP 503 when the key is missing (enabled by the repository Docker image). `/health` and the UUID-named `/media`, `/renders`, and `/assets` URLs remain reachable without a header for browser playback/download. CORS allows the configured `CORS_ORIGINS` and the `X-API-Key` request header.
+
+For Hugging Face Spaces, enable persistent storage mounted at `/data`; the Docker image sets `RECAPKIT_STORAGE_DIR=/data`. Add `RECAPKIT_API_KEY` as a Space Secret before making the Space public. In the web app, use **Backend access** to enter the same key on each device; it is stored only in that browser's local storage. Point Vercel's `NEXT_PUBLIC_API_URL` at the Space's HTTPS URL and redeploy. Without mounted persistent storage, user uploads and jobs may be lost when the Space restarts.

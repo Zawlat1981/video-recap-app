@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL?.replace(/\/+$/, "")
-  || (process.env.NODE_ENV === "development" ? "http://localhost:8000" : "");
+  || (process.env.NODE_ENV === "development"
+    ? "http://localhost:8000"
+    : "https://aungzawlatt-video-recap-backend.hf.space");
 const voices = ["my-MM-NilarNeural", "my-MM-ThihaNeural"] as const;
 const fonts = ["Noto Sans Myanmar", "Myanmar Text", "Arial"] as const;
 const colors = ["white", "yellow", "cyan"] as const;
@@ -445,9 +447,13 @@ export async function POST(request: NextRequest) {
 
   let upstream: Response;
   try {
+    const apiKey = request.headers.get("x-api-key");
     upstream = await fetch(`${API_BASE_URL}/api/jobs`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...(apiKey ? { "X-API-Key": apiKey } : {}),
+      },
       body: JSON.stringify(payload),
       cache: "no-store",
     });
