@@ -238,7 +238,7 @@ export default function Home() {
     if (!API_BASE_URL) return;
 
     const controller = new AbortController();
-    void fetch(backendUrl(`/api/jobs/${savedJobId}`), { signal: controller.signal, headers: backendAuthHeaders() })
+    void fetch(`/api/jobs?job_id=${encodeURIComponent(savedJobId)}`, { signal: controller.signal, headers: backendAuthHeaders() })
       .then(async (response) => {
         if (!response.ok) throw new Error("Saved render job is no longer available.");
         const savedJob = await response.json() as RenderJob;
@@ -257,13 +257,14 @@ export default function Home() {
 
   useEffect(() => {
     if (!activeJobId || !activeJobStatus || activeJobStatus === "completed" || activeJobStatus === "failed") return;
+    const jobId = activeJobId;
 
     const controller = new AbortController();
     let timeout: number;
 
     async function pollJob() {
       try {
-        const response = await fetch(backendUrl(`/api/jobs/${activeJobId}`), { signal: controller.signal, headers: backendAuthHeaders() });
+        const response = await fetch(`/api/jobs?job_id=${encodeURIComponent(jobId)}`, { signal: controller.signal, headers: backendAuthHeaders() });
         if (!response.ok) throw new Error("Job status could not be loaded.");
         const updatedJob = await response.json() as RenderJob;
         setRenderJob(updatedJob);
@@ -525,7 +526,7 @@ export default function Home() {
             : { upload_id: uploadId, operation };
       const headers = backendAuthHeaders();
       headers.set("Content-Type", "application/json");
-      const response = await fetch(backendUrl("/api/jobs"), {
+      const response = await fetch("/api/jobs", {
         method: "POST",
         headers,
         body: JSON.stringify(payload),
