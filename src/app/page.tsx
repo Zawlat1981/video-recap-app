@@ -240,7 +240,18 @@ export default function Home() {
     const controller = new AbortController();
     void fetch(`/api/jobs?job_id=${encodeURIComponent(savedJobId)}`, { signal: controller.signal, headers: backendAuthHeaders() })
       .then(async (response) => {
-        if (!response.ok) throw new Error("Saved render job is no longer available.");
+        if (response.status === 404) {
+          window.localStorage.removeItem("recapkit-job-id");
+          window.localStorage.removeItem("recapkit-upload-id");
+          setUploadId(null);
+          setUploadState("idle");
+          setError("Render service ပြန်စတင်သွားတဲ့အတွက် ယာယီသိမ်းထားတဲ့ job/video ပျောက်သွားနိုင်ပါတယ်။ Video ကို ပြန်ရွေးပြီး Upload လုပ်ပါ။");
+          return;
+        }
+        if (!response.ok) {
+          const result = await response.json() as { detail?: string };
+          throw new Error(result.detail ?? `Saved render job could not be loaded (${response.status}).`);
+        }
         const savedJob = await response.json() as RenderJob;
         if (savedJob.status === "failed") {
           window.localStorage.removeItem("recapkit-job-id");
@@ -248,8 +259,10 @@ export default function Home() {
         }
         setRenderJob(savedJob);
       })
-      .catch(() => {
-        if (!controller.signal.aborted) window.localStorage.removeItem("recapkit-job-id");
+      .catch((restoreError: unknown) => {
+        if (!controller.signal.aborted) {
+          setError(restoreError instanceof Error ? restoreError.message : "Saved render job could not be loaded.");
+        }
       });
 
     return () => controller.abort();
@@ -265,7 +278,28 @@ export default function Home() {
     async function pollJob() {
       try {
         const response = await fetch(`/api/jobs?job_id=${encodeURIComponent(jobId)}`, { signal: controller.signal, headers: backendAuthHeaders() });
-        if (!response.ok) throw new Error("Job status could not be loaded.");
+        if (response.status === 404) {
+          window.localStorage.removeItem("recapkit-job-id");
+          window.localStorage.removeItem("recapkit-upload-id");
+          setRenderJob(null);
+          setUploadId(null);
+          setMediaUrl(null);
+          setUploadState("idle");
+          setProgress(0);
+          setError("Render server မှာ ဒီ job ကို မတွေ့တော့ပါ။ Free server ပြန်စတင်ချိန် ယာယီ job/video ဖိုင်တွေ ပျောက်နိုင်ပါတယ်။ Video ကို ပြန် Upload လုပ်ပြီး ထပ်စမ်းပါ။");
+          return;
+        }
+        if (!response.ok) {
+          const result = await response.json() as { detail?: string };
+          const message = result.detail ?? `Job status could not be loaded (${response.status}).`;
+          if (response.status < 500) {
+            window.localStorage.removeItem("recapkit-job-id");
+            setRenderJob((current) => current ? { ...current, status: "failed", error: message } : current);
+            setError(message);
+            return;
+          }
+          throw new Error(message);
+        }
         const updatedJob = await response.json() as RenderJob;
         setRenderJob(updatedJob);
         setError(null);
@@ -274,7 +308,9 @@ export default function Home() {
         }
       } catch (pollError: unknown) {
         if (!controller.signal.aborted) {
-          setError(pollError instanceof Error ? pollError.message : "Job status could not be loaded.");
+          setError(pollError instanceof Error
+            ? `${pollError.message} ပြန်လည်ချိတ်ဆက်နေပါတယ်။`
+            : "Job status ကို ဖတ်မရပါ။ Server သို့ ပြန်လည်ချိတ်ဆက်နေပါတယ်။");
           timeout = window.setTimeout(pollJob, 2500);
         }
       }
