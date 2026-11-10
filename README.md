@@ -24,7 +24,7 @@ On a phone, open the Vercel URL in the browser. The feature menu becomes a horiz
 
 ## Deploy the backend to Render
 
-The root `render.yaml` Blueprint builds the Docker backend as `recapkit-video-backend` in Singapore on Render's **Free** web-service plan, enables the `/health` check, requires an API key, and stores files temporarily under `/tmp/recapkit-storage`. It does not create or require a persistent disk or payment method.
+The root `render.yaml` Blueprint builds the Docker backend as `recapkit-video-backend` in Singapore on Render's **Free** web-service plan, enables the `/health` check, requires an API key, and stores files temporarily under `/tmp/recapkit-storage`. The container listens on Render's default web-service port, `10000`. It does not create or require a persistent disk or payment method.
 
 1. Push this repository to GitHub and open the Render Dashboard. Choose **New > Blueprint**, connect `Zawlat1981/video-recap-app`, and deploy the `main` branch.
 2. When prompted, set `RECAPKIT_API_KEY` to a long random secret. You may reuse the secret already saved in Hugging Face, or generate a new one. Never commit it or send it in chat.
